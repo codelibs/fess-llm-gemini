@@ -611,6 +611,80 @@ public class GeminiLlmClient extends AbstractLlmClient {
     }
 
     @Override
+    protected void applyPromptTypeParams(final LlmChatRequest request, final String promptType) {
+        super.applyPromptTypeParams(request, promptType);
+        applyDefaultParams(request, promptType);
+    }
+
+    /**
+     * Applies default generation parameters for the Gemini API free tier.
+     * Only sets defaults when user has not configured the parameter.
+     *
+     * @param request the LLM chat request
+     * @param promptType the prompt type (e.g. "intent", "evaluation", "answer")
+     */
+    protected void applyDefaultParams(final LlmChatRequest request, final String promptType) {
+        switch (promptType) {
+        case "intent":
+        case "evaluation":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.1);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(256);
+            }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
+            }
+            break;
+        case "unclear":
+        case "noresults":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.7);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(512);
+            }
+            break;
+        case "docnotfound":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.7);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(256);
+            }
+            break;
+        case "direct":
+        case "faq":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.7);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(1024);
+            }
+            break;
+        case "answer":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.5);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(2048);
+            }
+            break;
+        case "summary":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.3);
+            }
+            if (request.getMaxTokens() == null) {
+                request.setMaxTokens(2048);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
+    @Override
     protected int getAvailabilityCheckInterval() {
         return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.availability.check.interval", "60"));
     }
