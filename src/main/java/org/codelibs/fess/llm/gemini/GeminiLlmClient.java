@@ -1,0 +1,717 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.llm.gemini;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.classic.methods.HttpPost;
+import org.apache.hc.core5.http.ContentType;
+import org.apache.hc.core5.http.ParseException;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
+import org.apache.hc.core5.http.io.entity.StringEntity;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.fess.llm.AbstractLlmClient;
+import org.codelibs.fess.llm.LlmChatRequest;
+import org.codelibs.fess.llm.LlmChatResponse;
+import org.codelibs.fess.llm.LlmException;
+import org.codelibs.fess.llm.LlmMessage;
+import org.codelibs.fess.llm.LlmStreamCallback;
+import org.codelibs.fess.util.ComponentUtil;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+
+/**
+ * LLM client implementation for Google Gemini API.
+ *
+ * Google Gemini provides cloud-based LLM services including Gemini models.
+ * This client supports both synchronous and streaming chat completions.
+ *
+ * @author FessProject
+ * @see <a href="https://ai.google.dev/docs">Google AI for Developers</a>
+ */
+public class GeminiLlmClient extends AbstractLlmClient {
+
+    private static final Logger logger = LogManager.getLogger(GeminiLlmClient.class);
+    /** The name identifier for the Gemini LLM client. */
+    protected static final String NAME = "gemini";
+
+    /** Gemini role for model responses (equivalent to "assistant" in OpenAI). */
+    protected static final String ROLE_MODEL = "model";
+
+    /** The system prompt for LLM interactions. */
+    protected String systemPrompt;
+    /** The prompt for detecting user intent. */
+    protected String intentDetectionPrompt;
+    /** The system prompt for handling unclear intents. */
+    protected String unclearIntentSystemPrompt;
+    /** The system prompt for handling no results. */
+    protected String noResultsSystemPrompt;
+    /** The system prompt for handling document not found. */
+    protected String documentNotFoundSystemPrompt;
+    /** The prompt for evaluating responses. */
+    protected String evaluationPrompt;
+    /** The system prompt for answer generation. */
+    protected String answerGenerationSystemPrompt;
+    /** The system prompt for summary generation. */
+    protected String summarySystemPrompt;
+    /** The system prompt for FAQ answer generation. */
+    protected String faqAnswerSystemPrompt;
+    /** The system prompt for direct answer generation. */
+    protected String directAnswerSystemPrompt;
+
+    /**
+     * Default constructor.
+     */
+    public GeminiLlmClient() {
+        // Default constructor
+    }
+
+    @Override
+    public String getName() {
+        return NAME;
+    }
+
+    @Override
+    protected boolean checkAvailabilityNow() {
+        final String apiKey = getApiKey();
+        if (StringUtil.isBlank(apiKey)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[LLM:GEMINI] Gemini is not available. apiKey is blank");
+            }
+            return false;
+        }
+        final String apiUrl = getApiUrl();
+        if (StringUtil.isBlank(apiUrl)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[LLM:GEMINI] Gemini is not available. apiUrl is blank");
+            }
+            return false;
+        }
+        try {
+            final String url = apiUrl + "/models?key=" + apiKey;
+            final HttpGet request = new HttpGet(url);
+            try (var response = getHttpClient().execute(request)) {
+                final int statusCode = response.getCode();
+                final boolean available = statusCode >= 200 && statusCode < 300;
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[LLM:GEMINI] Gemini availability check. url={}, statusCode={}, available={}", apiUrl, statusCode,
+                            available);
+                }
+                return available;
+            }
+        } catch (final Exception e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[LLM:GEMINI] Gemini is not available. url={}, error={}", apiUrl, e.getMessage());
+            }
+            return false;
+        }
+    }
+
+    @Override
+    public LlmChatResponse chat(final LlmChatRequest request) {
+        final String model = getModelName(request);
+        final String url = buildApiUrl(model, false);
+        final Map<String, Object> requestBody = buildRequestBody(request);
+        final long startTime = System.currentTimeMillis();
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("[LLM:GEMINI] Sending chat request to Gemini. url={}, model={}, messageCount={}", url, model,
+                    request.getMessages().size());
+        }
+
+        try {
+            final String json = objectMapper.writeValueAsString(requestBody);
+            if (logger.isDebugEnabled()) {
+                logger.debug("[LLM:GEMINI] requestBody={}", json);
+            }
+            final HttpPost httpRequest = new HttpPost(url);
+            httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
+
+            try (var response = getHttpClient().execute(httpRequest)) {
+                final int statusCode = response.getCode();
+                if (statusCode < 200 || statusCode >= 300) {
+                    String errorBody = "";
+                    if (response.getEntity() != null) {
+                        try {
+                            errorBody = EntityUtils.toString(response.getEntity());
+                        } catch (final IOException e) {
+                            // ignore
+                        }
+                    }
+                    logger.warn("Gemini API error. url={}, statusCode={}, message={}, body={}", url, statusCode, response.getReasonPhrase(),
+                            errorBody);
+                    throw new LlmException("Gemini API error: " + statusCode + " " + response.getReasonPhrase(),
+                            resolveErrorCode(statusCode));
+                }
+
+                final String responseBody = response.getEntity() != null ? EntityUtils.toString(response.getEntity()) : "";
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[LLM:GEMINI] responseBody={}", responseBody);
+                }
+                final JsonNode jsonNode = objectMapper.readTree(responseBody);
+
+                final LlmChatResponse chatResponse = new LlmChatResponse();
+                if (jsonNode.has("candidates") && jsonNode.get("candidates").isArray() && jsonNode.get("candidates").size() > 0) {
+                    final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
+                    if (firstCandidate.has("content") && firstCandidate.get("content").has("parts")) {
+                        final JsonNode parts = firstCandidate.get("content").get("parts");
+                        if (parts.isArray()) {
+                            final StringBuilder textContent = new StringBuilder();
+                            for (int i = 0; i < parts.size(); i++) {
+                                final JsonNode part = parts.get(i);
+                                // Skip thinking parts
+                                if (part.has("thought") && part.get("thought").asBoolean(false)) {
+                                    continue;
+                                }
+                                if (part.has("text")) {
+                                    textContent.append(part.get("text").asText());
+                                }
+                            }
+                            if (textContent.length() > 0) {
+                                chatResponse.setContent(textContent.toString());
+                            }
+                        }
+                    }
+                    if (firstCandidate.has("finishReason") && !firstCandidate.get("finishReason").isNull()) {
+                        chatResponse.setFinishReason(firstCandidate.get("finishReason").asText());
+                    }
+                }
+                if (jsonNode.has("modelVersion")) {
+                    chatResponse.setModel(jsonNode.get("modelVersion").asText());
+                } else {
+                    chatResponse.setModel(model);
+                }
+                if (jsonNode.has("usageMetadata")) {
+                    final JsonNode usage = jsonNode.get("usageMetadata");
+                    if (usage.has("promptTokenCount")) {
+                        chatResponse.setPromptTokens(usage.get("promptTokenCount").asInt());
+                    }
+                    if (usage.has("candidatesTokenCount")) {
+                        chatResponse.setCompletionTokens(usage.get("candidatesTokenCount").asInt());
+                    }
+                    if (usage.has("totalTokenCount")) {
+                        chatResponse.setTotalTokens(usage.get("totalTokenCount").asInt());
+                    }
+                }
+
+                if (logger.isDebugEnabled()) {
+                    logger.debug(
+                            "Received chat response from Gemini. model={}, promptTokens={}, completionTokens={}, totalTokens={}, contentLength={}, elapsedTime={}ms",
+                            chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
+                            chatResponse.getTotalTokens(), chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
+                            System.currentTimeMillis() - startTime);
+                }
+
+                return chatResponse;
+            }
+        } catch (final LlmException e) {
+            throw e;
+        } catch (final Exception e) {
+            logger.warn("Failed to call Gemini API. url={}, error={}", url, e.getMessage(), e);
+            throw new LlmException("Failed to call Gemini API", e);
+        }
+    }
+
+    @Override
+    public void streamChat(final LlmChatRequest request, final LlmStreamCallback callback) {
+        final String model = getModelName(request);
+        final String url = buildApiUrl(model, true);
+        final Map<String, Object> requestBody = buildRequestBody(request);
+        final long startTime = System.currentTimeMillis();
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("[LLM:GEMINI] Starting streaming chat request to Gemini. url={}, model={}, messageCount={}", url, model,
+                    request.getMessages().size());
+        }
+
+        try {
+            final String json = objectMapper.writeValueAsString(requestBody);
+            if (logger.isDebugEnabled()) {
+                logger.debug("[LLM:GEMINI] requestBody={}", json);
+            }
+            final HttpPost httpRequest = new HttpPost(url);
+            httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
+
+            try (var response = getHttpClient().execute(httpRequest)) {
+                final int statusCode = response.getCode();
+                if (statusCode < 200 || statusCode >= 300) {
+                    String errorBody = "";
+                    if (response.getEntity() != null) {
+                        try {
+                            errorBody = EntityUtils.toString(response.getEntity());
+                        } catch (final IOException | ParseException e) {
+                            // ignore
+                        }
+                    }
+                    logger.warn("Gemini streaming API error. url={}, statusCode={}, message={}, body={}", url, statusCode,
+                            response.getReasonPhrase(), errorBody);
+                    throw new LlmException("Gemini API error: " + statusCode + " " + response.getReasonPhrase(),
+                            resolveErrorCode(statusCode));
+                }
+
+                if (response.getEntity() == null) {
+                    logger.warn("Empty response from Gemini streaming API. url={}", url);
+                    throw new LlmException("Empty response from Gemini");
+                }
+
+                int chunkCount = 0;
+                try (BufferedReader reader =
+                        new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
+                    final StringBuilder jsonBuffer = new StringBuilder();
+                    int braceDepth = 0;
+                    boolean inString = false;
+                    boolean streamDone = false;
+
+                    String line;
+                    while ((line = reader.readLine()) != null && !streamDone) {
+                        if (StringUtil.isBlank(line)) {
+                            continue;
+                        }
+
+                        for (int ci = 0; ci < line.length() && !streamDone; ci++) {
+                            final char c = line.charAt(ci);
+
+                            if (braceDepth == 0) {
+                                // Outside JSON object - skip array-level delimiters
+                                if (c == '{') {
+                                    braceDepth = 1;
+                                    jsonBuffer.setLength(0);
+                                    jsonBuffer.append(c);
+                                }
+                                continue;
+                            }
+
+                            // Inside JSON object
+                            jsonBuffer.append(c);
+
+                            if (inString) {
+                                if (c == '\\') {
+                                    // Escape sequence - append next char and skip
+                                    ci++;
+                                    if (ci < line.length()) {
+                                        jsonBuffer.append(line.charAt(ci));
+                                    }
+                                } else if (c == '"') {
+                                    inString = false;
+                                }
+                            } else {
+                                if (c == '"') {
+                                    inString = true;
+                                } else if (c == '{') {
+                                    braceDepth++;
+                                } else if (c == '}') {
+                                    braceDepth--;
+                                    if (braceDepth == 0) {
+                                        // Complete JSON object accumulated
+                                        final String jsonStr = jsonBuffer.toString();
+                                        jsonBuffer.setLength(0);
+
+                                        try {
+                                            final JsonNode jsonNode = objectMapper.readTree(jsonStr);
+
+                                            boolean done = false;
+                                            if (jsonNode.has("candidates") && jsonNode.get("candidates").isArray()
+                                                    && jsonNode.get("candidates").size() > 0) {
+                                                final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
+                                                if (firstCandidate.has("finishReason") && !firstCandidate.get("finishReason").isNull()
+                                                        && !"null".equals(firstCandidate.get("finishReason").asText())) {
+                                                    done = true;
+                                                }
+
+                                                if (firstCandidate.has("content") && firstCandidate.get("content").has("parts")) {
+                                                    final JsonNode parts = firstCandidate.get("content").get("parts");
+                                                    boolean textSent = false;
+                                                    if (parts.isArray()) {
+                                                        for (int pi = 0; pi < parts.size(); pi++) {
+                                                            final JsonNode part = parts.get(pi);
+                                                            // Skip thinking parts
+                                                            if (part.has("thought") && part.get("thought").asBoolean(false)) {
+                                                                continue;
+                                                            }
+                                                            if (part.has("text")) {
+                                                                callback.onChunk(part.get("text").asText(), done);
+                                                                chunkCount++;
+                                                                textSent = true;
+                                                            }
+                                                        }
+                                                    }
+                                                    if (done && !textSent) {
+                                                        callback.onChunk("", true);
+                                                    }
+                                                } else if (done) {
+                                                    callback.onChunk("", true);
+                                                }
+
+                                                if (done) {
+                                                    streamDone = true;
+                                                }
+                                            }
+                                        } catch (final JsonProcessingException e) {
+                                            logger.warn("Failed to parse Gemini streaming response. json={}", jsonStr, e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[LLM:GEMINI] Completed streaming chat from Gemini. url={}, chunkCount={}, elapsedTime={}ms", url,
+                            chunkCount, System.currentTimeMillis() - startTime);
+                }
+            }
+        } catch (final LlmException e) {
+            callback.onError(e);
+            throw e;
+        } catch (final IOException e) {
+            logger.warn("Failed to stream from Gemini API. url={}, error={}", url, e.getMessage(), e);
+            final LlmException llmException = new LlmException("Failed to stream from Gemini API", e);
+            callback.onError(llmException);
+            throw llmException;
+        }
+    }
+
+    /**
+     * Gets the model name from the request or config.
+     *
+     * @param request the chat request
+     * @return the model name
+     */
+    protected String getModelName(final LlmChatRequest request) {
+        String model = request.getModel();
+        if (StringUtil.isBlank(model)) {
+            model = getModel();
+        }
+        return model;
+    }
+
+    /**
+     * Builds the API URL for the specified model.
+     *
+     * @param model the model name
+     * @param stream whether this is a streaming request
+     * @return the complete API URL
+     */
+    protected String buildApiUrl(final String model, final boolean stream) {
+        final String apiUrl = getApiUrl();
+        final String apiKey = getApiKey();
+        final String action = stream ? "streamGenerateContent" : "generateContent";
+        return apiUrl + "/models/" + model + ":" + action + "?key=" + apiKey;
+    }
+
+    /**
+     * Builds the request body for the Gemini API.
+     *
+     * @param request the chat request
+     * @return the request body as a map
+     */
+    protected Map<String, Object> buildRequestBody(final LlmChatRequest request) {
+        final Map<String, Object> body = new HashMap<>();
+
+        String systemMessage = null;
+        final List<LlmMessage> conversationMessages = new ArrayList<>();
+        for (final LlmMessage message : request.getMessages()) {
+            if (LlmMessage.ROLE_SYSTEM.equals(message.getRole())) {
+                if (systemMessage == null) {
+                    systemMessage = message.getContent();
+                } else {
+                    systemMessage = systemMessage + "\n" + message.getContent();
+                }
+            } else {
+                conversationMessages.add(message);
+            }
+        }
+
+        if (systemMessage != null) {
+            final Map<String, Object> systemInstruction = new HashMap<>();
+            final List<Map<String, String>> systemParts = new ArrayList<>();
+            final Map<String, String> textPart = new HashMap<>();
+            textPart.put("text", systemMessage);
+            systemParts.add(textPart);
+            systemInstruction.put("parts", systemParts);
+            body.put("systemInstruction", systemInstruction);
+        }
+
+        final List<Map<String, Object>> contents = conversationMessages.stream().map(this::convertMessage).collect(Collectors.toList());
+        body.put("contents", contents);
+
+        final Map<String, Object> generationConfig = new HashMap<>();
+        if (request.getTemperature() != null) {
+            generationConfig.put("temperature", request.getTemperature());
+        }
+        if (request.getMaxTokens() != null) {
+            generationConfig.put("maxOutputTokens", request.getMaxTokens());
+        }
+        if (request.getThinkingBudget() != null) {
+            final Map<String, Object> thinkingConfig = new HashMap<>();
+            thinkingConfig.put("thinkingBudget", request.getThinkingBudget());
+            generationConfig.put("thinkingConfig", thinkingConfig);
+        }
+        if (!generationConfig.isEmpty()) {
+            body.put("generationConfig", generationConfig);
+        }
+
+        return body;
+    }
+
+    /**
+     * Converts an LlmMessage to a map for the Gemini API request.
+     *
+     * @param message the message to convert
+     * @return the message as a map
+     */
+    protected Map<String, Object> convertMessage(final LlmMessage message) {
+        final Map<String, Object> map = new HashMap<>();
+
+        String role = message.getRole();
+        if (LlmMessage.ROLE_ASSISTANT.equals(role)) {
+            role = ROLE_MODEL;
+        }
+        map.put("role", role);
+
+        final List<Map<String, String>> parts = new ArrayList<>();
+        final Map<String, String> textPart = new HashMap<>();
+        textPart.put("text", message.getContent());
+        parts.add(textPart);
+        map.put("parts", parts);
+
+        return map;
+    }
+
+    /** Sets the system prompt for LLM interactions.
+     * @param systemPrompt the system prompt */
+    public void setSystemPrompt(final String systemPrompt) {
+        this.systemPrompt = systemPrompt;
+    }
+
+    /** Sets the prompt for detecting user intent.
+     * @param intentDetectionPrompt the intent detection prompt */
+    public void setIntentDetectionPrompt(final String intentDetectionPrompt) {
+        this.intentDetectionPrompt = intentDetectionPrompt;
+    }
+
+    /** Sets the system prompt for handling unclear intents.
+     * @param unclearIntentSystemPrompt the unclear intent system prompt */
+    public void setUnclearIntentSystemPrompt(final String unclearIntentSystemPrompt) {
+        this.unclearIntentSystemPrompt = unclearIntentSystemPrompt;
+    }
+
+    /** Sets the system prompt for handling no results.
+     * @param noResultsSystemPrompt the no results system prompt */
+    public void setNoResultsSystemPrompt(final String noResultsSystemPrompt) {
+        this.noResultsSystemPrompt = noResultsSystemPrompt;
+    }
+
+    /** Sets the system prompt for handling document not found.
+     * @param documentNotFoundSystemPrompt the document not found system prompt */
+    public void setDocumentNotFoundSystemPrompt(final String documentNotFoundSystemPrompt) {
+        this.documentNotFoundSystemPrompt = documentNotFoundSystemPrompt;
+    }
+
+    /** Sets the prompt for evaluating responses.
+     * @param evaluationPrompt the evaluation prompt */
+    public void setEvaluationPrompt(final String evaluationPrompt) {
+        this.evaluationPrompt = evaluationPrompt;
+    }
+
+    /** Sets the system prompt for answer generation.
+     * @param answerGenerationSystemPrompt the answer generation system prompt */
+    public void setAnswerGenerationSystemPrompt(final String answerGenerationSystemPrompt) {
+        this.answerGenerationSystemPrompt = answerGenerationSystemPrompt;
+    }
+
+    /** Sets the system prompt for summary generation.
+     * @param summarySystemPrompt the summary system prompt */
+    public void setSummarySystemPrompt(final String summarySystemPrompt) {
+        this.summarySystemPrompt = summarySystemPrompt;
+    }
+
+    /** Sets the system prompt for FAQ answer generation.
+     * @param faqAnswerSystemPrompt the FAQ answer system prompt */
+    public void setFaqAnswerSystemPrompt(final String faqAnswerSystemPrompt) {
+        this.faqAnswerSystemPrompt = faqAnswerSystemPrompt;
+    }
+
+    /** Sets the system prompt for direct answer generation.
+     * @param directAnswerSystemPrompt the direct answer system prompt */
+    public void setDirectAnswerSystemPrompt(final String directAnswerSystemPrompt) {
+        this.directAnswerSystemPrompt = directAnswerSystemPrompt;
+    }
+
+    private String resolveErrorCode(final int statusCode) {
+        if (statusCode == 429) {
+            return LlmException.ERROR_RATE_LIMIT;
+        }
+        if (statusCode == 401 || statusCode == 403) {
+            return LlmException.ERROR_AUTH;
+        }
+        if (statusCode == 502 || statusCode == 503) {
+            return LlmException.ERROR_SERVICE_UNAVAILABLE;
+        }
+        return LlmException.ERROR_UNKNOWN;
+    }
+
+    /**
+     * Gets the Gemini API key.
+     *
+     * @return the API key
+     */
+    protected String getApiKey() {
+        return ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.api.key", "");
+    }
+
+    /**
+     * Gets the Gemini API URL.
+     *
+     * @return the API URL
+     */
+    protected String getApiUrl() {
+        return ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.api.url", "https://generativelanguage.googleapis.com/v1beta");
+    }
+
+    @Override
+    protected String getModel() {
+        return ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.model", "gemini-3-flash-preview");
+    }
+
+    @Override
+    protected int getTimeout() {
+        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.timeout", "60000"));
+    }
+
+    @Override
+    protected String getConfigPrefix() {
+        return "rag.llm.gemini";
+    }
+
+    @Override
+    protected int getAvailabilityCheckInterval() {
+        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.availability.check.interval", "60"));
+    }
+
+    @Override
+    protected boolean isRagChatEnabled() {
+        return Boolean.parseBoolean(ComponentUtil.getFessConfig().getOrDefault("rag.chat.enabled", "false"));
+    }
+
+    @Override
+    protected String getLlmType() {
+        return ComponentUtil.getFessConfig().getSystemProperty("rag.llm.name", "ollama");
+    }
+
+    @Override
+    protected int getContextMaxChars() {
+        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.chat.context.max.chars", "4000"));
+    }
+
+    @Override
+    protected int getEvaluationMaxRelevantDocs() {
+        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.chat.evaluation.max.relevant.docs", "3"));
+    }
+
+    @Override
+    protected String getSystemPrompt() {
+        if (systemPrompt == null) {
+            throw new LlmException("systemPrompt is not configured for " + getName());
+        }
+        return systemPrompt;
+    }
+
+    @Override
+    protected String getIntentDetectionPrompt() {
+        if (intentDetectionPrompt == null) {
+            throw new LlmException("intentDetectionPrompt is not configured for " + getName());
+        }
+        return intentDetectionPrompt;
+    }
+
+    @Override
+    protected String getUnclearIntentSystemPrompt() {
+        if (unclearIntentSystemPrompt == null) {
+            throw new LlmException("unclearIntentSystemPrompt is not configured for " + getName());
+        }
+        return unclearIntentSystemPrompt;
+    }
+
+    @Override
+    protected String getNoResultsSystemPrompt() {
+        if (noResultsSystemPrompt == null) {
+            throw new LlmException("noResultsSystemPrompt is not configured for " + getName());
+        }
+        return noResultsSystemPrompt;
+    }
+
+    @Override
+    protected String getDocumentNotFoundSystemPrompt() {
+        if (documentNotFoundSystemPrompt == null) {
+            throw new LlmException("documentNotFoundSystemPrompt is not configured for " + getName());
+        }
+        return documentNotFoundSystemPrompt;
+    }
+
+    @Override
+    protected String getEvaluationPrompt() {
+        if (evaluationPrompt == null) {
+            throw new LlmException("evaluationPrompt is not configured for " + getName());
+        }
+        return evaluationPrompt;
+    }
+
+    @Override
+    protected String getAnswerGenerationSystemPrompt() {
+        if (answerGenerationSystemPrompt == null) {
+            throw new LlmException("answerGenerationSystemPrompt is not configured for " + getName());
+        }
+        return answerGenerationSystemPrompt;
+    }
+
+    @Override
+    protected String getSummarySystemPrompt() {
+        if (summarySystemPrompt == null) {
+            throw new LlmException("summarySystemPrompt is not configured for " + getName());
+        }
+        return summarySystemPrompt;
+    }
+
+    @Override
+    protected String getFaqAnswerSystemPrompt() {
+        if (faqAnswerSystemPrompt == null) {
+            throw new LlmException("faqAnswerSystemPrompt is not configured for " + getName());
+        }
+        return faqAnswerSystemPrompt;
+    }
+
+    @Override
+    protected String getDirectAnswerSystemPrompt() {
+        if (directAnswerSystemPrompt == null) {
+            throw new LlmException("directAnswerSystemPrompt is not configured for " + getName());
+        }
+        return directAnswerSystemPrompt;
+    }
+}

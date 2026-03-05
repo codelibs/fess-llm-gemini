@@ -1,0 +1,20 @@
+# Maven
+/target/
+
+# IDE - Eclipse
+/.settings/
+.project
+.classpath
+
+# IDE - IntelliJ IDEA
+*.iml
+.idea/
+
+# IDE - VS Code
+.vscode/
+
+# OS
+.DS_Store
+
+# Serena
+.serena/
