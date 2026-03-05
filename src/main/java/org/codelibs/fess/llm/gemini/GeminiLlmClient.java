@@ -710,6 +710,11 @@ public class GeminiLlmClient extends AbstractLlmClient {
     }
 
     @Override
+    protected int getEvaluationDescriptionMaxChars() {
+        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.chat.evaluation.description.max.chars", "500"));
+    }
+
+    @Override
     protected String getSystemPrompt() {
         if (systemPrompt == null) {
             throw new LlmException("systemPrompt is not configured for " + getName());
