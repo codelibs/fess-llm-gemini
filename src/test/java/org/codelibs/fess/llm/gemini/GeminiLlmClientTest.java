@@ -1476,6 +1476,110 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         client.init();
     }
 
+    // --- applyPromptTypeParams tests ---
+
+    @Test
+    public void test_applyDefaultParams_intent() {
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "intent");
+        assertEquals(Double.valueOf(0.1), request.getTemperature());
+        assertEquals(Integer.valueOf(256), request.getMaxTokens());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_evaluation() {
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "evaluation");
+        assertEquals(Double.valueOf(0.1), request.getTemperature());
+        assertEquals(Integer.valueOf(256), request.getMaxTokens());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_unclear() {
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "unclear");
+        assertEquals(Double.valueOf(0.7), request.getTemperature());
+        assertEquals(Integer.valueOf(512), request.getMaxTokens());
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_noresults() {
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "noresults");
+        assertEquals(Double.valueOf(0.7), request.getTemperature());
+        assertEquals(Integer.valueOf(512), request.getMaxTokens());
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_docnotfound() {
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "docnotfound");
+        assertEquals(Double.valueOf(0.7), request.getTemperature());
+        assertEquals(Integer.valueOf(256), request.getMaxTokens());
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_direct() {
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "direct");
+        assertEquals(Double.valueOf(0.7), request.getTemperature());
+        assertEquals(Integer.valueOf(1024), request.getMaxTokens());
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_faq() {
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "faq");
+        assertEquals(Double.valueOf(0.7), request.getTemperature());
+        assertEquals(Integer.valueOf(1024), request.getMaxTokens());
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_answer() {
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "answer");
+        assertEquals(Double.valueOf(0.5), request.getTemperature());
+        assertEquals(Integer.valueOf(2048), request.getMaxTokens());
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_summary() {
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "summary");
+        assertEquals(Double.valueOf(0.3), request.getTemperature());
+        assertEquals(Integer.valueOf(2048), request.getMaxTokens());
+        assertNull(request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_userSettingsPreserved() {
+        final LlmChatRequest request = new LlmChatRequest();
+        request.setTemperature(0.9);
+        request.setMaxTokens(8192);
+        request.setThinkingBudget(1000);
+        client.testApplyDefaultParams(request, "intent");
+        assertEquals(Double.valueOf(0.9), request.getTemperature());
+        assertEquals(Integer.valueOf(8192), request.getMaxTokens());
+        assertEquals(Integer.valueOf(1000), request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_unknownType() {
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "unknown");
+        assertNull(request.getTemperature());
+        assertNull(request.getMaxTokens());
+        assertNull(request.getThinkingBudget());
+    }
+
     /**
      * Testable subclass of GeminiLlmClient that allows setting configuration values
      * directly without depending on FessConfig.
@@ -1553,6 +1657,10 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         @Override
         protected int getAvailabilityCheckInterval() {
             return 0;
+        }
+
+        void testApplyDefaultParams(final LlmChatRequest request, final String promptType) {
+            applyDefaultParams(request, promptType);
         }
     }
 }
