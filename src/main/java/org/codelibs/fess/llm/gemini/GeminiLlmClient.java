@@ -140,7 +140,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
         final long startTime = System.currentTimeMillis();
 
         if (logger.isDebugEnabled()) {
-            logger.debug("[LLM:GEMINI] Sending chat request to Gemini. url={}, model={}, messageCount={}", url, model,
+            logger.debug("[LLM:GEMINI] Sending chat request to Gemini. url={}, model={}, messageCount={}", maskApiKeyInUrl(url), model,
                     request.getMessages().size());
         }
 
@@ -163,8 +163,8 @@ public class GeminiLlmClient extends AbstractLlmClient {
                             // ignore
                         }
                     }
-                    logger.warn("Gemini API error. url={}, statusCode={}, message={}, body={}", url, statusCode, response.getReasonPhrase(),
-                            errorBody);
+                    logger.warn("Gemini API error. url={}, statusCode={}, message={}, body={}", maskApiKeyInUrl(url), statusCode,
+                            response.getReasonPhrase(), errorBody);
                     throw new LlmException("Gemini API error: " + statusCode + " " + response.getReasonPhrase(),
                             resolveErrorCode(statusCode));
                 }
@@ -232,7 +232,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
         } catch (final LlmException e) {
             throw e;
         } catch (final Exception e) {
-            logger.warn("Failed to call Gemini API. url={}, error={}", url, e.getMessage(), e);
+            logger.warn("Failed to call Gemini API. url={}, error={}", maskApiKeyInUrl(url), e.getMessage(), e);
             throw new LlmException("Failed to call Gemini API", LlmException.ERROR_CONNECTION, e);
         }
     }
@@ -245,8 +245,8 @@ public class GeminiLlmClient extends AbstractLlmClient {
         final long startTime = System.currentTimeMillis();
 
         if (logger.isDebugEnabled()) {
-            logger.debug("[LLM:GEMINI] Starting streaming chat request to Gemini. url={}, model={}, messageCount={}", url, model,
-                    request.getMessages().size());
+            logger.debug("[LLM:GEMINI] Starting streaming chat request to Gemini. url={}, model={}, messageCount={}", maskApiKeyInUrl(url),
+                    model, request.getMessages().size());
         }
 
         try {
@@ -268,14 +268,14 @@ public class GeminiLlmClient extends AbstractLlmClient {
                             // ignore
                         }
                     }
-                    logger.warn("Gemini streaming API error. url={}, statusCode={}, message={}, body={}", url, statusCode,
+                    logger.warn("Gemini streaming API error. url={}, statusCode={}, message={}, body={}", maskApiKeyInUrl(url), statusCode,
                             response.getReasonPhrase(), errorBody);
                     throw new LlmException("Gemini API error: " + statusCode + " " + response.getReasonPhrase(),
                             resolveErrorCode(statusCode));
                 }
 
                 if (response.getEntity() == null) {
-                    logger.warn("Empty response from Gemini streaming API. url={}", url);
+                    logger.warn("Empty response from Gemini streaming API. url={}", maskApiKeyInUrl(url));
                     throw new LlmException("Empty response from Gemini");
                 }
 
@@ -391,15 +391,15 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 }
 
                 if (logger.isDebugEnabled()) {
-                    logger.debug("[LLM:GEMINI] Completed streaming chat from Gemini. url={}, chunkCount={}, elapsedTime={}ms", url,
-                            chunkCount, System.currentTimeMillis() - startTime);
+                    logger.debug("[LLM:GEMINI] Completed streaming chat from Gemini. url={}, chunkCount={}, elapsedTime={}ms",
+                            maskApiKeyInUrl(url), chunkCount, System.currentTimeMillis() - startTime);
                 }
             }
         } catch (final LlmException e) {
             callback.onError(e);
             throw e;
         } catch (final IOException e) {
-            logger.warn("Failed to stream from Gemini API. url={}, error={}", url, e.getMessage(), e);
+            logger.warn("Failed to stream from Gemini API. url={}, error={}", maskApiKeyInUrl(url), e.getMessage(), e);
             final LlmException llmException = new LlmException("Failed to stream from Gemini API", LlmException.ERROR_CONNECTION, e);
             callback.onError(llmException);
             throw llmException;
@@ -511,6 +511,19 @@ public class GeminiLlmClient extends AbstractLlmClient {
         map.put("parts", parts);
 
         return map;
+    }
+
+    /**
+     * Masks the API key in a URL by replacing the key value with "***".
+     *
+     * @param url the URL that may contain an API key parameter
+     * @return the URL with the API key masked
+     */
+    protected String maskApiKeyInUrl(final String url) {
+        if (url == null) {
+            return null;
+        }
+        return url.replaceAll("([?&])key=[^&]*", "$1key=***");
     }
 
     /** Sets the system prompt for LLM interactions.
@@ -696,13 +709,26 @@ public class GeminiLlmClient extends AbstractLlmClient {
     }
 
     @Override
-    protected int getContextMaxChars() {
-        final int value = Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.chat.context.max.chars", "4000"));
-        if (value <= 0) {
-            logger.warn("Invalid context max chars: {}. Using default: 4000", value);
-            return 4000;
+    protected int getContextMaxChars(final String promptType) {
+        final String key = "rag.llm.gemini." + promptType + ".context.max.chars";
+        final String configValue = ComponentUtil.getFessConfig().getOrDefault(key, null);
+        if (configValue != null) {
+            final int value = Integer.parseInt(configValue);
+            if (value > 0) {
+                return value;
+            }
+            logger.warn("Invalid context max chars for promptType={}: {}. Using default.", promptType, value);
         }
-        return value;
+        switch (promptType) {
+        case "answer":
+            return 16000;
+        case "summary":
+            return 16000;
+        case "faq":
+            return 10000;
+        default:
+            return 10000;
+        }
     }
 
     @Override
