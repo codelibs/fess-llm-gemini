@@ -233,7 +233,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
             throw e;
         } catch (final Exception e) {
             logger.warn("Failed to call Gemini API. url={}, error={}", url, e.getMessage(), e);
-            throw new LlmException("Failed to call Gemini API", e);
+            throw new LlmException("Failed to call Gemini API", LlmException.ERROR_CONNECTION, e);
         }
     }
 
@@ -311,10 +311,19 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
                             if (inString) {
                                 if (c == '\\') {
-                                    // Escape sequence - append next char and skip
+                                    // Escape sequence - append next char(s) and skip
                                     ci++;
                                     if (ci < line.length()) {
-                                        jsonBuffer.append(line.charAt(ci));
+                                        final char escaped = line.charAt(ci);
+                                        jsonBuffer.append(escaped);
+                                        if (escaped == 'u') {
+                                            // Unicode escape sequence - skip 4 hex digits
+                                            final int end = Math.min(ci + 4, line.length() - 1);
+                                            for (int ui = ci + 1; ui <= end; ui++) {
+                                                jsonBuffer.append(line.charAt(ui));
+                                            }
+                                            ci = end;
+                                        }
                                     }
                                 } else if (c == '"') {
                                     inString = false;
@@ -391,7 +400,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
             throw e;
         } catch (final IOException e) {
             logger.warn("Failed to stream from Gemini API. url={}, error={}", url, e.getMessage(), e);
-            final LlmException llmException = new LlmException("Failed to stream from Gemini API", e);
+            final LlmException llmException = new LlmException("Failed to stream from Gemini API", LlmException.ERROR_CONNECTION, e);
             callback.onError(llmException);
             throw llmException;
         }
@@ -564,19 +573,6 @@ public class GeminiLlmClient extends AbstractLlmClient {
         this.directAnswerSystemPrompt = directAnswerSystemPrompt;
     }
 
-    private String resolveErrorCode(final int statusCode) {
-        if (statusCode == 429) {
-            return LlmException.ERROR_RATE_LIMIT;
-        }
-        if (statusCode == 401 || statusCode == 403) {
-            return LlmException.ERROR_AUTH;
-        }
-        if (statusCode == 502 || statusCode == 503) {
-            return LlmException.ERROR_SERVICE_UNAVAILABLE;
-        }
-        return LlmException.ERROR_UNKNOWN;
-    }
-
     /**
      * Gets the Gemini API key.
      *
@@ -701,17 +697,34 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     @Override
     protected int getContextMaxChars() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.chat.context.max.chars", "4000"));
+        final int value = Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.chat.context.max.chars", "4000"));
+        if (value <= 0) {
+            logger.warn("Invalid context max chars: {}. Using default: 4000", value);
+            return 4000;
+        }
+        return value;
     }
 
     @Override
     protected int getEvaluationMaxRelevantDocs() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.chat.evaluation.max.relevant.docs", "3"));
+        final int value =
+                Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.chat.evaluation.max.relevant.docs", "3"));
+        if (value <= 0) {
+            logger.warn("Invalid evaluation max relevant docs: {}. Using default: 3", value);
+            return 3;
+        }
+        return value;
     }
 
     @Override
     protected int getEvaluationDescriptionMaxChars() {
-        return Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.chat.evaluation.description.max.chars", "500"));
+        final int value =
+                Integer.parseInt(ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.chat.evaluation.description.max.chars", "500"));
+        if (value <= 0) {
+            logger.warn("Invalid evaluation description max chars: {}. Using default: 500", value);
+            return 500;
+        }
+        return value;
     }
 
     @Override
