@@ -9,6 +9,7 @@
 		<property name="systemPrompt">
 "You are an AI assistant for Fess search engine. "
 + "Answer questions based on the search results provided. "
++ "If the provided documents do not contain enough information, state that explicitly. "
 + "Always cite your sources using [1], [2], etc."
 		</property>
 		<property name="intentDetectionPrompt">
@@ -38,6 +39,7 @@
 + "Input: \"How to use Fess with Docker\"\n"
 + "Output: {\"intent\":\"search\",\"query\":\"+\\\"Fess\\\" +Docker (usage OR howto OR tutorial)\",\"reasoning\":\"Tutorial query\"}\n\n"
 + "{{languageInstruction}}\n"
++ "{{conversationHistory}}\n"
 + "Question: {{userMessage}}\n\n"
 + "Response (JSON only):"
 		</property>
