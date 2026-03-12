@@ -219,20 +219,18 @@ public class GeminiLlmClient extends AbstractLlmClient {
                     }
                 }
 
-                if (logger.isDebugEnabled()) {
-                    logger.debug(
-                            "Received chat response from Gemini. model={}, promptTokens={}, completionTokens={}, totalTokens={}, contentLength={}, elapsedTime={}ms",
-                            chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
-                            chatResponse.getTotalTokens(), chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
-                            System.currentTimeMillis() - startTime);
-                }
+                logger.info(
+                        "[LLM:GEMINI] Chat response received. model={}, promptTokens={}, completionTokens={}, totalTokens={}, contentLength={}, elapsedTime={}ms",
+                        chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
+                        chatResponse.getTotalTokens(), chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
+                        System.currentTimeMillis() - startTime);
 
                 return chatResponse;
             }
         } catch (final LlmException e) {
             throw e;
         } catch (final Exception e) {
-            logger.warn("Failed to call Gemini API. url={}, error={}", maskApiKeyInUrl(url), e.getMessage(), e);
+            logger.warn("[LLM:GEMINI] Failed to call Gemini API. url={}, error={}", maskApiKeyInUrl(url), e.getMessage(), e);
             throw new LlmException("Failed to call Gemini API", LlmException.ERROR_CONNECTION, e);
         }
     }
@@ -275,7 +273,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 }
 
                 if (response.getEntity() == null) {
-                    logger.warn("Empty response from Gemini streaming API. url={}", maskApiKeyInUrl(url));
+                    logger.warn("[LLM:GEMINI] Empty response from Gemini streaming API. url={}", maskApiKeyInUrl(url));
                     throw new LlmException("Empty response from Gemini");
                 }
 
@@ -390,16 +388,14 @@ public class GeminiLlmClient extends AbstractLlmClient {
                     }
                 }
 
-                if (logger.isDebugEnabled()) {
-                    logger.debug("[LLM:GEMINI] Completed streaming chat from Gemini. url={}, chunkCount={}, elapsedTime={}ms",
-                            maskApiKeyInUrl(url), chunkCount, System.currentTimeMillis() - startTime);
-                }
+                logger.info("[LLM:GEMINI] Stream completed. chunkCount={}, elapsedTime={}ms", chunkCount,
+                        System.currentTimeMillis() - startTime);
             }
         } catch (final LlmException e) {
             callback.onError(e);
             throw e;
         } catch (final IOException e) {
-            logger.warn("Failed to stream from Gemini API. url={}, error={}", maskApiKeyInUrl(url), e.getMessage(), e);
+            logger.warn("[LLM:GEMINI] Failed to stream from Gemini API. url={}, error={}", maskApiKeyInUrl(url), e.getMessage(), e);
             final LlmException llmException = new LlmException("Failed to stream from Gemini API", LlmException.ERROR_CONNECTION, e);
             callback.onError(llmException);
             throw llmException;
