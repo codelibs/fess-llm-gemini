@@ -163,7 +163,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                             // ignore
                         }
                     }
-                    logger.warn("Gemini API error. url={}, statusCode={}, message={}, body={}", maskApiKeyInUrl(url), statusCode,
+                    logger.warn("[LLM:GEMINI] API error. url={}, statusCode={}, message={}, body={}", maskApiKeyInUrl(url), statusCode,
                             response.getReasonPhrase(), errorBody);
                     throw new LlmException("Gemini API error: " + statusCode + " " + response.getReasonPhrase(),
                             resolveErrorCode(statusCode));
@@ -266,8 +266,8 @@ public class GeminiLlmClient extends AbstractLlmClient {
                             // ignore
                         }
                     }
-                    logger.warn("Gemini streaming API error. url={}, statusCode={}, message={}, body={}", maskApiKeyInUrl(url), statusCode,
-                            response.getReasonPhrase(), errorBody);
+                    logger.warn("[LLM:GEMINI] Streaming API error. url={}, statusCode={}, message={}, body={}", maskApiKeyInUrl(url),
+                            statusCode, response.getReasonPhrase(), errorBody);
                     throw new LlmException("Gemini API error: " + statusCode + " " + response.getReasonPhrase(),
                             resolveErrorCode(statusCode));
                 }
@@ -278,6 +278,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 }
 
                 int chunkCount = 0;
+                long firstChunkTime = 0;
                 try (BufferedReader reader =
                         new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
                     final StringBuilder jsonBuffer = new StringBuilder();
@@ -362,6 +363,9 @@ public class GeminiLlmClient extends AbstractLlmClient {
                                                             }
                                                             if (part.has("text")) {
                                                                 callback.onChunk(part.get("text").asText(), done);
+                                                                if (chunkCount == 0) {
+                                                                    firstChunkTime = System.currentTimeMillis() - startTime;
+                                                                }
                                                                 chunkCount++;
                                                                 textSent = true;
                                                             }
@@ -379,7 +383,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                                                 }
                                             }
                                         } catch (final JsonProcessingException e) {
-                                            logger.warn("Failed to parse Gemini streaming response. json={}", jsonStr, e);
+                                            logger.warn("[LLM:GEMINI] Failed to parse streaming response. json={}", jsonStr, e);
                                         }
                                     }
                                 }
@@ -388,7 +392,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                     }
                 }
 
-                logger.info("[LLM:GEMINI] Stream completed. chunkCount={}, elapsedTime={}ms", chunkCount,
+                logger.info("[LLM:GEMINI] Stream completed. chunkCount={}, firstChunkMs={}, elapsedTime={}ms", chunkCount, firstChunkTime,
                         System.currentTimeMillis() - startTime);
             }
         } catch (final LlmException e) {
