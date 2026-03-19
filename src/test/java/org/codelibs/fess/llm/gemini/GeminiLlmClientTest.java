@@ -1580,6 +1580,23 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         assertNull(request.getThinkingBudget());
     }
 
+    // --- Budget method tests ---
+
+    @Test
+    public void test_getHistoryMaxChars_default() {
+        assertEquals(10000, client.testGetHistoryMaxChars());
+    }
+
+    @Test
+    public void test_getIntentHistoryMaxMessages_default() {
+        assertEquals(10, client.testGetIntentHistoryMaxMessages());
+    }
+
+    @Test
+    public void test_getHistoryAssistantMaxChars_default() {
+        assertEquals(1000, client.testGetHistoryAssistantMaxChars());
+    }
+
     /**
      * Testable subclass of GeminiLlmClient that allows setting configuration values
      * directly without depending on FessConfig.
@@ -1659,8 +1676,45 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             return 0;
         }
 
+        @Override
+        protected int getHistoryMaxChars() {
+            return 10000;
+        }
+
+        @Override
+        protected int getIntentHistoryMaxMessages() {
+            return 10;
+        }
+
+        @Override
+        protected int getIntentHistoryMaxChars() {
+            return 5000;
+        }
+
+        @Override
+        public int getHistoryAssistantMaxChars() {
+            return 1000;
+        }
+
+        @Override
+        public int getHistoryAssistantSummaryMaxChars() {
+            return 1000;
+        }
+
         void testApplyDefaultParams(final LlmChatRequest request, final String promptType) {
             applyDefaultParams(request, promptType);
+        }
+
+        int testGetHistoryMaxChars() {
+            return getHistoryMaxChars();
+        }
+
+        int testGetIntentHistoryMaxMessages() {
+            return getIntentHistoryMaxMessages();
+        }
+
+        int testGetHistoryAssistantMaxChars() {
+            return getHistoryAssistantMaxChars();
         }
     }
 }
