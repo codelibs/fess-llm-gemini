@@ -39,6 +39,13 @@
 + "QUERY SYNTAX FALLBACK:\n"
 + "- If unsure about complex query syntax, generate simple keyword queries instead\n"
 + "- A simple keyword query is always better than a malformed Fess query\n\n"
++ "IMPORTANT SYNTAX RULES:\n"
++ "- Always ensure quotation marks are properly paired and balanced.\n"
++ "- Always ensure parentheses are properly paired and balanced.\n"
++ "- When using OR grouping for synonyms, include 2-3 alternatives (e.g., (tutorial OR guide OR howto)).\n"
++ "- Example of CORRECT complex query: title:\"Fess\"^2 +\"Docker\" (installation OR setup OR tutorial)\n"
++ "- Example of INCORRECT query (unbalanced quotes): title:\"Fess +Docker\n"
++ "- Example of INCORRECT query (unbalanced parens): (Fess OR Docker\n\n"
 + "NON-ENGLISH INPUT:\n"
 + "- For non-English queries, keep the original language terms in the search query\n"
 + "- Do not translate search terms to English\n\n"
@@ -142,6 +149,25 @@
 		</property>
 		<property name="directAnswerSystemPrompt">
 "{{systemPrompt}}\n"
++ "{{languageInstruction}}"
+		</property>
+		<property name="queryRegenerationPrompt">
+"You are a search query optimizer for Fess search engine.\n\n"
++ "The user asked the following question:\n"
++ "{{userMessage}}\n\n"
++ "The previous search query was:\n"
++ "{{failedQuery}}\n\n"
++ "Result: {{failureReason}}\n\n"
++ "Generate a NEW, DIFFERENT search query that is more likely to find relevant results.\n\n"
++ "Guidelines:\n"
++ "- Use simpler, broader keywords than the previous query.\n"
++ "- Avoid complex query syntax (no field prefixes like title:, no boost ^, no required +).\n"
++ "- Try different word choices or synonyms.\n"
++ "- If the previous query was too specific, make it more general.\n"
++ "- For non-English input, keep original language terms.\n"
++ "- Return 2-5 simple keywords separated by spaces.\n\n"
++ "Return JSON only:\n"
++ "{\"query\": \"new search query\", \"reasoning\": \"brief explanation\"}\n"
 + "{{languageInstruction}}"
 		</property>
 	</component>
