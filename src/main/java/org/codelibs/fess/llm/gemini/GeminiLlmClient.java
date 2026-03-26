@@ -573,6 +573,9 @@ public class GeminiLlmClient extends AbstractLlmClient {
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(512);
             }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
+            }
             break;
         case "docnotfound":
             if (request.getTemperature() == null) {
@@ -581,6 +584,9 @@ public class GeminiLlmClient extends AbstractLlmClient {
             if (request.getMaxTokens() == null) {
                 request.setMaxTokens(256);
             }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
+            }
             break;
         case "direct":
         case "faq":
@@ -588,7 +594,10 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.7);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(1024);
+                request.setMaxTokens(2048);
+            }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(1024);
             }
             break;
         case "answer":
@@ -596,7 +605,10 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.5);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(2048);
+                request.setMaxTokens(4096);
+            }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(2048);
             }
             break;
         case "summary":
@@ -604,7 +616,10 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.3);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(2048);
+                request.setMaxTokens(4096);
+            }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(2048);
             }
             break;
         case "queryregeneration":
