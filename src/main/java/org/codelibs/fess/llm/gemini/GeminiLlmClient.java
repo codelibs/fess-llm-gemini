@@ -502,7 +502,17 @@ public class GeminiLlmClient extends AbstractLlmClient {
         final String apiUrl = getApiUrl();
         final String apiKey = getApiKey();
         final String action = stream ? "streamGenerateContent" : "generateContent";
-        return apiUrl + "/models/" + model + ":" + action + "?key=" + apiKey;
+        final StringBuilder url = new StringBuilder().append(apiUrl)
+                .append("/models/")
+                .append(model)
+                .append(":")
+                .append(action)
+                .append("?key=")
+                .append(apiKey);
+        if (stream) {
+            url.append("&alt=sse");
+        }
+        return url.toString();
     }
 
     /**

@@ -293,7 +293,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
         final String url = client.buildApiUrl("gemini-2.5-flash", true);
 
-        assertEquals("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=test-key", url);
+        assertEquals("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=test-key&alt=sse",
+                url);
     }
 
     @Test
@@ -1533,6 +1534,34 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         assertTrue(GeminiLlmClient.isAbnormalFinishReason(response.getFinishReason()));
     }
 
+    // ========== buildApiUrl streaming alt=sse tests ==========
+
+    @Test
+    public void test_buildApiUrl_streamingUsesAltSse() {
+        setupClientForMockServer();
+        final String url = client.testBuildApiUrl("gemini-2.5-flash", true);
+        assertTrue("expected ?alt=sse in URL but was: " + url, url.contains("alt=sse"));
+        assertTrue("expected key parameter in URL", url.contains("key="));
+        assertTrue("expected streamGenerateContent action", url.contains(":streamGenerateContent"));
+    }
+
+    @Test
+    public void test_buildApiUrl_nonStreamingHasNoAltSse() {
+        setupClientForMockServer();
+        final String url = client.testBuildApiUrl("gemini-2.5-flash", false);
+        assertFalse("non-stream URL should NOT carry alt=sse: " + url, url.contains("alt=sse"));
+        assertTrue(url.contains(":generateContent"));
+    }
+
+    @Test
+    public void test_maskApiKeyInUrl_withAltSse() {
+        setupClientForMockServer();
+        final String masked = client.testMaskApiKeyInUrl(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=SECRET&alt=sse");
+        assertEquals("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=***&alt=sse",
+                masked);
+    }
+
     // ========== Stream completion log diagnostics tests ==========
     // These tests verify that streamChat emits finishReason and usageMetadata
     // in its "Stream completed" INFO log so that 1-character / truncated-response
@@ -2095,6 +2124,14 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
         void testApplyDefaultParams(final LlmChatRequest request, final String promptType) {
             applyDefaultParams(request, promptType);
+        }
+
+        public String testBuildApiUrl(final String model, final boolean stream) {
+            return buildApiUrl(model, stream);
+        }
+
+        public String testMaskApiKeyInUrl(final String url) {
+            return maskApiKeyInUrl(url);
         }
 
         int testGetHistoryMaxChars() {
