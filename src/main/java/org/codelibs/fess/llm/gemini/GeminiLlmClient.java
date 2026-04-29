@@ -575,7 +575,12 @@ public class GeminiLlmClient extends AbstractLlmClient {
         }
         if (request.getThinkingBudget() != null) {
             final Map<String, Object> thinkingConfig = new HashMap<>();
-            thinkingConfig.put("thinkingBudget", request.getThinkingBudget());
+            final String model = getModelName(request);
+            if (isGemini3(model)) {
+                thinkingConfig.put("thinkingLevel", budgetToThinkingLevel(request.getThinkingBudget()));
+            } else {
+                thinkingConfig.put("thinkingBudget", request.getThinkingBudget());
+            }
             generationConfig.put("thinkingConfig", thinkingConfig);
         }
         if (!generationConfig.isEmpty()) {
@@ -862,6 +867,39 @@ public class GeminiLlmClient extends AbstractLlmClient {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Detects whether a model id refers to the Gemini 3 generation, which uses
+     * {@code thinkingLevel} (LOW/MEDIUM/HIGH) instead of the integer
+     * {@code thinkingBudget} accepted by Gemini 2.x.
+     *
+     * @param model the model id, for example {@code "gemini-3-flash"} or {@code "gemini-3.1-pro"}.
+     * @return {@code true} when the id starts with {@code "gemini-3"}; {@code false} when {@code null} or any other generation.
+     */
+    static boolean isGemini3(final String model) {
+        if (model == null) {
+            return false;
+        }
+        return model.startsWith("gemini-3") || model.startsWith("gemini-3.");
+    }
+
+    /**
+     * Translates a Gemini 2.x {@code thinkingBudget} (integer token allowance) into the
+     * Gemini 3.x {@code thinkingLevel} bucket. Mapping: {@code <=0 -> LOW}, {@code <=4096 -> MEDIUM},
+     * {@code >4096 -> HIGH}.
+     *
+     * @param budget the requested thinking budget in tokens.
+     * @return one of {@code "LOW"}, {@code "MEDIUM"}, {@code "HIGH"}.
+     */
+    static String budgetToThinkingLevel(final int budget) {
+        if (budget <= 0) {
+            return "LOW";
+        }
+        if (budget <= 4096) {
+            return "MEDIUM";
+        }
+        return "HIGH";
     }
 
 }

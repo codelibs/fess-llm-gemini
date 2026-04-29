@@ -38,6 +38,8 @@ import org.codelibs.fess.unit.UnitFessTestCase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -351,7 +353,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
     @Test
     public void test_buildRequestBody_withThinkingBudget() {
-        client.setTestModel("gemini-3-flash-preview");
+        // Gemini 2.x retains the integer thinkingBudget field on the wire.
+        client.setTestModel("gemini-2.5-flash");
         client.setTestTemperature(0.7);
         client.setTestMaxTokens(4096);
 
@@ -371,7 +374,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
     @Test
     public void test_buildRequestBody_withThinkingBudgetZero() {
-        client.setTestModel("gemini-3-flash-preview");
+        // Gemini 2.x retains the integer thinkingBudget field on the wire.
+        client.setTestModel("gemini-2.5-flash");
         client.setTestTemperature(0.3);
         client.setTestMaxTokens(500);
 
@@ -1676,6 +1680,59 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
                 masked);
     }
 
+    // ========== Model-aware thinking config tests ==========
+
+    @Test
+    public void test_buildRequestBody_gemini3UsesThinkingLevel() throws Exception {
+        setupClientForMockServer();
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(1024).setThinkingBudget(0);
+        // Force the model to a Gemini 3 id via test hook
+        final String json = client.testBuildRequestBodyForModel(request, "gemini-3-flash");
+        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
+        assertFalse("thinkingBudget MUST NOT be sent to Gemini 3", thinking.has("thinkingBudget"));
+        assertEquals("LOW", thinking.path("thinkingLevel").asText());
+    }
+
+    @Test
+    public void test_buildRequestBody_gemini3MediumLevel() throws Exception {
+        setupClientForMockServer();
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(2048).setThinkingBudget(2048);
+        final String json = client.testBuildRequestBodyForModel(request, "gemini-3-pro");
+        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        assertEquals("MEDIUM", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
+    }
+
+    @Test
+    public void test_buildRequestBody_gemini3HighLevel() throws Exception {
+        setupClientForMockServer();
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(8192).setThinkingBudget(8192);
+        final String json = client.testBuildRequestBodyForModel(request, "gemini-3.1-pro");
+        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        assertEquals("HIGH", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
+    }
+
+    @Test
+    public void test_buildRequestBody_gemini25KeepsThinkingBudget() throws Exception {
+        setupClientForMockServer();
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(8192).setThinkingBudget(2048);
+        final String json = client.testBuildRequestBodyForModel(request, "gemini-2.5-flash");
+        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
+        assertEquals(2048, thinking.path("thinkingBudget").asInt());
+        assertFalse("thinkingLevel MUST NOT be sent to Gemini 2.x", thinking.has("thinkingLevel"));
+    }
+
+    @Test
+    public void test_isGemini3_recognisesIds() {
+        assertTrue(GeminiLlmClient.isGemini3("gemini-3-flash"));
+        assertTrue(GeminiLlmClient.isGemini3("gemini-3-flash-preview"));
+        assertTrue(GeminiLlmClient.isGemini3("gemini-3.1-pro"));
+        assertFalse(GeminiLlmClient.isGemini3("gemini-2.5-flash"));
+        assertFalse(GeminiLlmClient.isGemini3("gemini-1.5-pro"));
+        assertFalse(GeminiLlmClient.isGemini3(null));
+    }
+
     // ========== Stream completion log diagnostics tests ==========
     // These tests verify that streamChat emits finishReason and usageMetadata
     // in its "Stream completed" INFO log so that 1-character / truncated-response
@@ -2246,6 +2303,11 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
         public String testMaskApiKeyInUrl(final String url) {
             return maskApiKeyInUrl(url);
+        }
+
+        public String testBuildRequestBodyForModel(final LlmChatRequest request, final String model) throws Exception {
+            request.setModel(model);
+            return objectMapper.writeValueAsString(buildRequestBody(request));
         }
 
         int testGetHistoryMaxChars() {
