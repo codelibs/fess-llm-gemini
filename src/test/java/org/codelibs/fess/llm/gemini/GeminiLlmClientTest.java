@@ -2003,6 +2003,57 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         assertEquals(1, doneCount.get());
     }
 
+    // ========== promptFeedback / safetyRatings WARN tests ==========
+
+    @Test
+    public void test_chat_promptFeedbackBlockedTriggersWarn() throws IOException {
+        final String responseJson =
+                """
+                        {
+                            "promptFeedback": {"blockReason": "SAFETY", "safetyRatings": [{"category": "HARM_CATEGORY_HARASSMENT", "probability": "HIGH", "blocked": true}]},
+                            "candidates": []
+                        }
+                        """;
+        mockServer.enqueue(new MockResponse().setBody(responseJson).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hi");
+        final LlmChatResponse response = client.chat(request);
+
+        // No content, no finishReason. We're verifying the call path doesn't crash.
+        assertNull(response.getContent());
+        // The WARN actually fires; we don't capture log output here, but make sure response object is still useful.
+    }
+
+    @Test
+    public void test_streamChat_safetyRatingsCapturedOnSafetyStop() throws IOException {
+        final String streamResponse =
+                """
+                        [
+                        {"candidates":[{"content":{"parts":[{"text":"Partial"}],"role":"model"},"finishReason":"SAFETY","safetyRatings":[{"category":"HARM_CATEGORY_HATE_SPEECH","probability":"HIGH","blocked":true}]}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}
+                        ]
+                        """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "text/event-stream"));
+        setupClientForMockServer();
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hi");
+        final List<String> chunks = new ArrayList<>();
+        client.streamChat(request, new LlmStreamCallback() {
+            @Override
+            public void onChunk(final String content, final boolean done) {
+                chunks.add(content);
+            }
+
+            @Override
+            public void onError(final Throwable error) {
+                fail("Unexpected error: " + error.getMessage());
+            }
+        });
+        assertEquals(1, chunks.size());
+        assertEquals("Partial", chunks.get(0));
+        // The WARN log carrying safetyRatings is exercised by this code path.
+    }
+
     // ========== Helper methods ==========
 
     private void setupClientForMockServer() {

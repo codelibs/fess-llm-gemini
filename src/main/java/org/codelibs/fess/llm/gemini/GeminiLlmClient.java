@@ -273,6 +273,22 @@ public class GeminiLlmClient extends AbstractLlmClient {
                             chatResponse.getFinishReason(), chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
                             chatResponse.getModel());
                 }
+                if (jsonNode.has("promptFeedback")) {
+                    final JsonNode pf = jsonNode.get("promptFeedback");
+                    if (pf.has("blockReason") && !pf.get("blockReason").isNull()) {
+                        logger.warn("[LLM:GEMINI] Prompt blocked. blockReason={}, safetyRatings={}, model={}",
+                                pf.get("blockReason").asText(), stringifySafetyRatings(pf), chatResponse.getModel());
+                    }
+                }
+                if (isAbnormalFinishReason(chatResponse.getFinishReason()) && jsonNode.has("candidates")
+                        && jsonNode.get("candidates").size() > 0) {
+                    final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
+                    final String safetyDetail = stringifySafetyRatings(firstCandidate);
+                    if (safetyDetail != null) {
+                        logger.warn("[LLM:GEMINI] Candidate safety ratings. finishReason={}, safetyRatings={}, model={}",
+                                chatResponse.getFinishReason(), safetyDetail, chatResponse.getModel());
+                    }
+                }
 
                 return chatResponse;
             }
@@ -337,6 +353,8 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 long firstChunkTime = 0;
                 String lastFinishReason = null;
                 String lastResponseId = null;
+                String lastBlockReason = null;
+                String lastSafetyRatings = null;
                 Integer promptTokenCount = null;
                 Integer cachedContentTokenCount = null;
                 Integer candidatesTokenCount = null;
@@ -421,6 +439,12 @@ public class GeminiLlmClient extends AbstractLlmClient {
                                             if (jsonNode.has("responseId") && !jsonNode.get("responseId").isNull()) {
                                                 lastResponseId = jsonNode.get("responseId").asText();
                                             }
+                                            if (jsonNode.has("promptFeedback")) {
+                                                final JsonNode pf = jsonNode.get("promptFeedback");
+                                                if (pf.has("blockReason") && !pf.get("blockReason").isNull()) {
+                                                    lastBlockReason = pf.get("blockReason").asText();
+                                                }
+                                            }
                                             if (jsonNode.has("usageMetadata")) {
                                                 final JsonNode usage = jsonNode.get("usageMetadata");
                                                 if (usage.has("promptTokenCount")) {
@@ -444,6 +468,10 @@ public class GeminiLlmClient extends AbstractLlmClient {
                                             if (jsonNode.has("candidates") && jsonNode.get("candidates").isArray()
                                                     && jsonNode.get("candidates").size() > 0) {
                                                 final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
+                                                final String safetyDetail = stringifySafetyRatings(firstCandidate);
+                                                if (safetyDetail != null) {
+                                                    lastSafetyRatings = safetyDetail;
+                                                }
                                                 final String reason = extractFinishReason(firstCandidate);
                                                 if (reason != null) {
                                                     lastFinishReason = reason;
@@ -500,6 +528,13 @@ public class GeminiLlmClient extends AbstractLlmClient {
                     logger.warn(
                             "[LLM:GEMINI] Stream finished abnormally. responseId={}, finishReason={}, chunkCount={}, candidatesTokens={}, thoughtsTokens={}, model={}",
                             lastResponseId, lastFinishReason, chunkCount, candidatesTokenCount, thoughtsTokenCount, model);
+                }
+                if (lastBlockReason != null) {
+                    logger.warn("[LLM:GEMINI] Stream prompt blocked. blockReason={}, model={}", lastBlockReason, model);
+                }
+                if (isAbnormalFinishReason(lastFinishReason) && lastSafetyRatings != null) {
+                    logger.warn("[LLM:GEMINI] Stream candidate safety ratings. finishReason={}, safetyRatings={}, model={}",
+                            lastFinishReason, lastSafetyRatings, model);
                 }
                 if (streamSummaryConsumer != null) {
                     streamSummaryConsumer.accept(new StreamSummary(chunkCount, objectCount, lastFinishReason, lastResponseId,
@@ -885,7 +920,46 @@ public class GeminiLlmClient extends AbstractLlmClient {
         if (reason == null || "STOP".equals(reason) || "FINISH_REASON_UNSPECIFIED".equals(reason)) {
             return false;
         }
+        // LANGUAGE / SAFETY / RECITATION / BLOCKLIST / PROHIBITED_CONTENT / SPII /
+        // MALFORMED_FUNCTION_CALL / IMAGE_SAFETY / OTHER all flow through this
+        // catch-all so the WARN sibling log fires on any non-STOP completion.
         return true;
+    }
+
+    /**
+     * Renders a candidate's {@code safetyRatings} array as a single-line diagnostic
+     * string of the form {@code "[CATEGORY:PROBABILITY(blocked),...]"}. Categories or
+     * probabilities that are missing are rendered as {@code UNKNOWN}; the
+     * {@code (blocked)} suffix appears only when the rating's {@code blocked} flag
+     * is {@code true}.
+     *
+     * @param candidate the candidate JSON node (may be {@code null}); also accepts a
+     *            {@code promptFeedback} node, since both expose a {@code safetyRatings}
+     *            array with the same shape.
+     * @return the formatted ratings string, or {@code null} when no {@code safetyRatings}
+     *         array is present.
+     */
+    private static String stringifySafetyRatings(final JsonNode candidate) {
+        if (candidate == null || !candidate.has("safetyRatings")) {
+            return null;
+        }
+        final JsonNode ratings = candidate.get("safetyRatings");
+        if (!ratings.isArray()) {
+            return null;
+        }
+        final StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < ratings.size(); i++) {
+            final JsonNode r = ratings.get(i);
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append(r.path("category").asText("UNKNOWN")).append(":").append(r.path("probability").asText("UNKNOWN"));
+            if (r.has("blocked") && r.get("blocked").asBoolean(false)) {
+                sb.append("(blocked)");
+            }
+        }
+        sb.append("]");
+        return sb.toString();
     }
 
     /**
