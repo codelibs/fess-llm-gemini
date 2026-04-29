@@ -46,6 +46,33 @@ All runtime config is read from `ComponentUtil.getFessConfig()` with prefix `rag
 ### Test Infrastructure
 Tests use `UnitFessTestCase` (extends `WebContainerTestCase` from utflute-lastaflute) with `test_app.xml` for DI container setup. HTTP calls are mocked via OkHttp's `MockWebServer`. The test class creates a `TestableGeminiLlmClient` inner subclass that overrides config methods to point at the mock server.
 
+### Logging keys
+
+`streamChat` emits a single `[LLM:GEMINI] Stream completed.` INFO line per call carrying:
+`chunkCount`, `objectCount`, `firstChunkMs`, `elapsedTime`, `finishReason`,
+`promptTokens`, `candidatesTokens`, `thoughtsTokens`, `totalTokens`.
+
+When `finishReason` is anything other than `STOP` / `FINISH_REASON_UNSPECIFIED`,
+both `chat()` and `streamChat()` emit an extra WARN line so truncation
+(`MAX_TOKENS`) and content blocking (`SAFETY`, `RECITATION`,
+`PROHIBITED_CONTENT`, `BLOCKLIST`, `SPII`, `IMAGE_SAFETY`,
+`MALFORMED_FUNCTION_CALL`, `OTHER`) can be alerted on without enabling DEBUG.
+
+Enable `org.codelibs.fess.llm.gemini` at DEBUG level to additionally log:
+- the JSON request body sent to Gemini (`requestBody=`),
+- HTTP status + `Content-Type` of the streaming response,
+- each parsed JSON object from the stream (`streamObject#N json=`).
+
+### Default generation parameters
+
+Streaming-output prompt types (`direct`, `faq`, `answer`, `summary`) default to
+`thinkingBudget=0`. `maxOutputTokens` defaults are kept at sizes large enough
+to fit the expected response without truncation
+(`direct=2048, faq=2048, answer=8192, summary=4096`).
+Override per prompt type via `rag.llm.gemini.<type>.thinking.budget` and
+`rag.llm.gemini.<type>.max.tokens` in `fess_config.properties`
+(or `-Dfess.config....`).
+
 ## Coding Conventions
 
 - Apache License 2.0 header on all Java files
