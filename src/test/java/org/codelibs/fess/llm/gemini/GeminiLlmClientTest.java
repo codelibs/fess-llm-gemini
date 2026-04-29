@@ -572,6 +572,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         mockServer.enqueue(new MockResponse().setResponseCode(429).setBody(errorJson).addHeader("Content-Type", "application/json"));
 
         setupClientForMockServer();
+        client.setTestRetryBaseDelayMs(0);
+        client.setTestRetryMaxAttempts(1);
 
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hello");
 
@@ -579,7 +581,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             client.chat(request);
             fail("Expected LlmException to be thrown");
         } catch (final LlmException error) {
-            assertTrue(error.getMessage().contains("429"));
+            assertTrue(causeChainContains(error, "429"));
         }
     }
 
@@ -598,6 +600,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         mockServer.enqueue(new MockResponse().setResponseCode(500).setBody(errorJson).addHeader("Content-Type", "application/json"));
 
         setupClientForMockServer();
+        client.setTestRetryBaseDelayMs(0);
+        client.setTestRetryMaxAttempts(1);
 
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hello");
 
@@ -605,7 +609,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             client.chat(request);
             fail("Expected LlmException to be thrown");
         } catch (final LlmException error) {
-            assertTrue(error.getMessage().contains("500"));
+            assertTrue(causeChainContains(error, "500"));
         }
     }
 
@@ -614,6 +618,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         mockServer.enqueue(new MockResponse().setResponseCode(503).setBody("").addHeader("Content-Type", "application/json"));
 
         setupClientForMockServer();
+        client.setTestRetryBaseDelayMs(0);
+        client.setTestRetryMaxAttempts(1);
 
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hello");
 
@@ -621,7 +627,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             client.chat(request);
             fail("Expected LlmException to be thrown");
         } catch (final LlmException error) {
-            assertTrue(error.getMessage().contains("503"));
+            assertTrue(causeChainContains(error, "503"));
         }
     }
 
@@ -813,6 +819,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         mockServer.enqueue(new MockResponse().setResponseCode(429).setBody(errorJson).addHeader("Content-Type", "application/json"));
 
         setupClientForMockServer();
+        client.setTestRetryBaseDelayMs(0);
+        client.setTestRetryMaxAttempts(1);
 
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hello");
         final AtomicBoolean errorReceived = new AtomicBoolean(false);
@@ -831,7 +839,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             });
             fail("Expected LlmException to be thrown");
         } catch (final LlmException error) {
-            assertTrue(error.getMessage().contains("429"));
+            assertTrue(causeChainContains(error, "429"));
             assertTrue(errorReceived.get());
         }
     }
@@ -850,6 +858,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         mockServer.enqueue(new MockResponse().setResponseCode(500).setBody(errorJson).addHeader("Content-Type", "application/json"));
 
         setupClientForMockServer();
+        client.setTestRetryBaseDelayMs(0);
+        client.setTestRetryMaxAttempts(1);
 
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hello");
         final AtomicBoolean errorReceived = new AtomicBoolean(false);
@@ -868,7 +878,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             });
             fail("Expected LlmException to be thrown");
         } catch (final LlmException error) {
-            assertTrue(error.getMessage().contains("500"));
+            assertTrue(causeChainContains(error, "500"));
             assertTrue(errorReceived.get());
         }
     }
@@ -1381,6 +1391,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         mockServer.enqueue(new MockResponse().setResponseCode(503).setBody("Service Unavailable"));
 
         setupClientForMockServer();
+        client.setTestRetryBaseDelayMs(0);
+        client.setTestRetryMaxAttempts(1);
 
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hello");
         final AtomicBoolean errorReceived = new AtomicBoolean(false);
@@ -1399,7 +1411,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             });
             fail("Expected LlmException to be thrown");
         } catch (final LlmException error) {
-            assertTrue(error.getMessage().contains("503"));
+            assertTrue(causeChainContains(error, "503"));
             assertTrue(errorReceived.get());
         }
     }
@@ -1409,6 +1421,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         mockServer.enqueue(new MockResponse().setResponseCode(503).setBody("Service Unavailable"));
 
         setupClientForMockServer();
+        client.setTestRetryBaseDelayMs(0);
+        client.setTestRetryMaxAttempts(1);
 
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hello");
 
@@ -1416,7 +1430,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             client.chat(request);
             fail("Expected LlmException to be thrown");
         } catch (final LlmException error) {
-            assertTrue(error.getMessage().contains("503"));
+            assertTrue(causeChainContains(error, "503"));
         }
     }
 
@@ -2054,7 +2068,88 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         // The WARN log carrying safetyRatings is exercised by this code path.
     }
 
+    // ========== Retry with exponential backoff tests ==========
+
+    @Test
+    public void test_chat_retriesOn503ThenSucceeds() throws Exception {
+        mockServer.enqueue(new MockResponse().setResponseCode(503)
+                .setBody("{\"error\":{\"code\":503,\"status\":\"UNAVAILABLE\",\"message\":\"busy\"}}"));
+        mockServer.enqueue(
+                new MockResponse().setBody("{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}")
+                        .addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+        client.setTestRetryBaseDelayMs(0);
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi");
+        final LlmChatResponse response = client.chat(request);
+        assertEquals("ok", response.getContent());
+        assertEquals(2, mockServer.getRequestCount());
+    }
+
+    @Test
+    public void test_chat_giveUpAfterMaxRetries() throws Exception {
+        for (int i = 0; i < 3; i++) {
+            mockServer.enqueue(new MockResponse().setResponseCode(503).setBody("{\"error\":{\"code\":503,\"status\":\"UNAVAILABLE\"}}"));
+        }
+        setupClientForMockServer();
+        client.setTestRetryBaseDelayMs(0);
+        client.setTestRetryMaxAttempts(3);
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi");
+        try {
+            client.chat(request);
+            fail("expected exception");
+        } catch (final LlmException expected) {
+            // expected
+        }
+        assertEquals(3, mockServer.getRequestCount());
+    }
+
+    @Test
+    public void test_chat_doesNotRetryOn400() throws Exception {
+        mockServer.enqueue(new MockResponse().setResponseCode(400).setBody("{\"error\":{\"code\":400,\"status\":\"INVALID_ARGUMENT\"}}"));
+        setupClientForMockServer();
+        client.setTestRetryBaseDelayMs(0);
+        client.setTestRetryMaxAttempts(3);
+
+        try {
+            client.chat(new LlmChatRequest().addUserMessage("hi"));
+            fail("expected exception");
+        } catch (final LlmException expected) {
+            // expected
+        }
+        assertEquals(1, mockServer.getRequestCount());
+    }
+
+    @Test
+    public void test_isRetryableStatus_classification() {
+        assertTrue(GeminiLlmClient.isRetryableStatus(429));
+        assertTrue(GeminiLlmClient.isRetryableStatus(500));
+        assertTrue(GeminiLlmClient.isRetryableStatus(503));
+        assertTrue(GeminiLlmClient.isRetryableStatus(504));
+        assertFalse(GeminiLlmClient.isRetryableStatus(400));
+        assertFalse(GeminiLlmClient.isRetryableStatus(403));
+        assertFalse(GeminiLlmClient.isRetryableStatus(404));
+        assertFalse(GeminiLlmClient.isRetryableStatus(200));
+    }
+
     // ========== Helper methods ==========
+
+    /**
+     * Returns true when {@code throwable} or any cause in its chain has a message that
+     * contains {@code needle}. Used to assert on retry-wrapped status codes that are
+     * surfaced via the cause chain after retry exhaustion.
+     */
+    private static boolean causeChainContains(final Throwable throwable, final String needle) {
+        Throwable t = throwable;
+        while (t != null) {
+            if (t.getMessage() != null && t.getMessage().contains(needle)) {
+                return true;
+            }
+            t = t.getCause();
+        }
+        return false;
+    }
 
     private void setupClientForMockServer() {
         final String baseUrl = mockServer.url("").toString();
@@ -2273,6 +2368,26 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         private int testTimeout = 60000;
         private double testTemperature = 0.7;
         private int testMaxTokens = 4096;
+        private long testRetryBaseDelayMs = 2000L;
+        private int testRetryMaxAttempts = 3;
+
+        public void setTestRetryBaseDelayMs(final long ms) {
+            this.testRetryBaseDelayMs = ms;
+        }
+
+        public void setTestRetryMaxAttempts(final int n) {
+            this.testRetryMaxAttempts = n;
+        }
+
+        @Override
+        protected long getRetryBaseDelayMs() {
+            return testRetryBaseDelayMs;
+        }
+
+        @Override
+        protected int getRetryMaxAttempts() {
+            return testRetryMaxAttempts;
+        }
 
         void setTestApiKey(final String apiKey) {
             this.testApiKey = apiKey;

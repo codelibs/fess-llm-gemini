@@ -188,110 +188,116 @@ public class GeminiLlmClient extends AbstractLlmClient {
             httpRequest.addHeader("x-goog-api-key", getApiKey());
             httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
 
-            try (var response = getHttpClient().execute(httpRequest)) {
-                final int statusCode = response.getCode();
-                if (statusCode < 200 || statusCode >= 300) {
-                    String errorBody = "";
-                    if (response.getEntity() != null) {
-                        try {
-                            errorBody = EntityUtils.toString(response.getEntity());
-                        } catch (final IOException e) {
-                            // ignore
-                        }
-                    }
-                    logger.warn("[LLM:GEMINI] API error. url={}, statusCode={}, message={}, body={}", maskApiKeyInUrl(url), statusCode,
-                            response.getReasonPhrase(), errorBody);
-                    throw new LlmException("Gemini API error: " + statusCode + " " + response.getReasonPhrase(),
-                            resolveErrorCode(statusCode));
-                }
-
-                final String responseBody = response.getEntity() != null ? EntityUtils.toString(response.getEntity()) : "";
-                if (logger.isDebugEnabled()) {
-                    logger.debug("[LLM:GEMINI] responseBody={}", responseBody);
-                }
-                final JsonNode jsonNode = objectMapper.readTree(responseBody);
-
-                final LlmChatResponse chatResponse = new LlmChatResponse();
-                if (jsonNode.has("candidates") && jsonNode.get("candidates").isArray() && jsonNode.get("candidates").size() > 0) {
-                    final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
-                    if (firstCandidate.has("content") && firstCandidate.get("content").has("parts")) {
-                        final JsonNode parts = firstCandidate.get("content").get("parts");
-                        if (parts.isArray()) {
-                            final StringBuilder textContent = new StringBuilder();
-                            for (int i = 0; i < parts.size(); i++) {
-                                final JsonNode part = parts.get(i);
-                                // Skip thinking parts
-                                if (part.has("thought") && part.get("thought").asBoolean(false)) {
-                                    continue;
-                                }
-                                if (part.has("text")) {
-                                    textContent.append(part.get("text").asText());
-                                }
-                            }
-                            if (textContent.length() > 0) {
-                                chatResponse.setContent(textContent.toString());
+            return executeWithRetry("chat", () -> {
+                try (var response = getHttpClient().execute(httpRequest)) {
+                    final int statusCode = response.getCode();
+                    if (statusCode < 200 || statusCode >= 300) {
+                        String errorBody = "";
+                        if (response.getEntity() != null) {
+                            try {
+                                errorBody = EntityUtils.toString(response.getEntity());
+                            } catch (final IOException e) {
+                                // ignore
                             }
                         }
+                        logger.warn("[LLM:GEMINI] API error. url={}, statusCode={}, message={}, body={}", maskApiKeyInUrl(url), statusCode,
+                                response.getReasonPhrase(), errorBody);
+                        if (isRetryableStatus(statusCode)) {
+                            throw new RetryableHttpException(statusCode, response.getReasonPhrase());
+                        }
+                        throw new LlmException("Gemini API error: " + statusCode + " " + response.getReasonPhrase(),
+                                resolveErrorCode(statusCode));
                     }
-                    if (firstCandidate.has("finishReason") && !firstCandidate.get("finishReason").isNull()) {
-                        chatResponse.setFinishReason(firstCandidate.get("finishReason").asText());
-                    }
-                }
-                if (jsonNode.has("modelVersion")) {
-                    chatResponse.setModel(jsonNode.get("modelVersion").asText());
-                } else {
-                    chatResponse.setModel(model);
-                }
-                Integer cachedTokens = null;
-                if (jsonNode.has("usageMetadata")) {
-                    final JsonNode usage = jsonNode.get("usageMetadata");
-                    if (usage.has("promptTokenCount")) {
-                        chatResponse.setPromptTokens(usage.get("promptTokenCount").asInt());
-                    }
-                    if (usage.has("cachedContentTokenCount")) {
-                        cachedTokens = usage.get("cachedContentTokenCount").asInt();
-                    }
-                    if (usage.has("candidatesTokenCount")) {
-                        chatResponse.setCompletionTokens(usage.get("candidatesTokenCount").asInt());
-                    }
-                    if (usage.has("totalTokenCount")) {
-                        chatResponse.setTotalTokens(usage.get("totalTokenCount").asInt());
-                    }
-                }
-                String responseId = null;
-                if (jsonNode.has("responseId") && !jsonNode.get("responseId").isNull()) {
-                    responseId = jsonNode.get("responseId").asText();
-                }
 
-                logger.info(
-                        "[LLM:GEMINI] Chat response received. model={}, responseId={}, promptTokens={}, cachedContentTokens={}, completionTokens={}, totalTokens={}, contentLength={}, elapsedTime={}ms",
-                        chatResponse.getModel(), responseId, chatResponse.getPromptTokens(), cachedTokens,
-                        chatResponse.getCompletionTokens(), chatResponse.getTotalTokens(),
-                        chatResponse.getContent() != null ? chatResponse.getContent().length() : 0, System.currentTimeMillis() - startTime);
-                if (isAbnormalFinishReason(chatResponse.getFinishReason())) {
-                    logger.warn("[LLM:GEMINI] Chat finished abnormally. finishReason={}, contentLength={}, model={}",
-                            chatResponse.getFinishReason(), chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
-                            chatResponse.getModel());
-                }
-                if (jsonNode.has("promptFeedback")) {
-                    final JsonNode pf = jsonNode.get("promptFeedback");
-                    if (pf.has("blockReason") && !pf.get("blockReason").isNull()) {
-                        logger.warn("[LLM:GEMINI] Prompt blocked. blockReason={}, safetyRatings={}, model={}",
-                                pf.get("blockReason").asText(), stringifySafetyRatings(pf), chatResponse.getModel());
+                    final String responseBody = response.getEntity() != null ? EntityUtils.toString(response.getEntity()) : "";
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("[LLM:GEMINI] responseBody={}", responseBody);
                     }
-                }
-                if (isAbnormalFinishReason(chatResponse.getFinishReason()) && jsonNode.has("candidates")
-                        && jsonNode.get("candidates").size() > 0) {
-                    final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
-                    final String safetyDetail = stringifySafetyRatings(firstCandidate);
-                    if (safetyDetail != null) {
-                        logger.warn("[LLM:GEMINI] Candidate safety ratings. finishReason={}, safetyRatings={}, model={}",
-                                chatResponse.getFinishReason(), safetyDetail, chatResponse.getModel());
-                    }
-                }
+                    final JsonNode jsonNode = objectMapper.readTree(responseBody);
 
-                return chatResponse;
-            }
+                    final LlmChatResponse chatResponse = new LlmChatResponse();
+                    if (jsonNode.has("candidates") && jsonNode.get("candidates").isArray() && jsonNode.get("candidates").size() > 0) {
+                        final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
+                        if (firstCandidate.has("content") && firstCandidate.get("content").has("parts")) {
+                            final JsonNode parts = firstCandidate.get("content").get("parts");
+                            if (parts.isArray()) {
+                                final StringBuilder textContent = new StringBuilder();
+                                for (int i = 0; i < parts.size(); i++) {
+                                    final JsonNode part = parts.get(i);
+                                    // Skip thinking parts
+                                    if (part.has("thought") && part.get("thought").asBoolean(false)) {
+                                        continue;
+                                    }
+                                    if (part.has("text")) {
+                                        textContent.append(part.get("text").asText());
+                                    }
+                                }
+                                if (textContent.length() > 0) {
+                                    chatResponse.setContent(textContent.toString());
+                                }
+                            }
+                        }
+                        if (firstCandidate.has("finishReason") && !firstCandidate.get("finishReason").isNull()) {
+                            chatResponse.setFinishReason(firstCandidate.get("finishReason").asText());
+                        }
+                    }
+                    if (jsonNode.has("modelVersion")) {
+                        chatResponse.setModel(jsonNode.get("modelVersion").asText());
+                    } else {
+                        chatResponse.setModel(model);
+                    }
+                    Integer cachedTokens = null;
+                    if (jsonNode.has("usageMetadata")) {
+                        final JsonNode usage = jsonNode.get("usageMetadata");
+                        if (usage.has("promptTokenCount")) {
+                            chatResponse.setPromptTokens(usage.get("promptTokenCount").asInt());
+                        }
+                        if (usage.has("cachedContentTokenCount")) {
+                            cachedTokens = usage.get("cachedContentTokenCount").asInt();
+                        }
+                        if (usage.has("candidatesTokenCount")) {
+                            chatResponse.setCompletionTokens(usage.get("candidatesTokenCount").asInt());
+                        }
+                        if (usage.has("totalTokenCount")) {
+                            chatResponse.setTotalTokens(usage.get("totalTokenCount").asInt());
+                        }
+                    }
+                    String responseId = null;
+                    if (jsonNode.has("responseId") && !jsonNode.get("responseId").isNull()) {
+                        responseId = jsonNode.get("responseId").asText();
+                    }
+
+                    logger.info(
+                            "[LLM:GEMINI] Chat response received. model={}, responseId={}, promptTokens={}, cachedContentTokens={}, completionTokens={}, totalTokens={}, contentLength={}, elapsedTime={}ms",
+                            chatResponse.getModel(), responseId, chatResponse.getPromptTokens(), cachedTokens,
+                            chatResponse.getCompletionTokens(), chatResponse.getTotalTokens(),
+                            chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
+                            System.currentTimeMillis() - startTime);
+                    if (isAbnormalFinishReason(chatResponse.getFinishReason())) {
+                        logger.warn("[LLM:GEMINI] Chat finished abnormally. finishReason={}, contentLength={}, model={}",
+                                chatResponse.getFinishReason(), chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
+                                chatResponse.getModel());
+                    }
+                    if (jsonNode.has("promptFeedback")) {
+                        final JsonNode pf = jsonNode.get("promptFeedback");
+                        if (pf.has("blockReason") && !pf.get("blockReason").isNull()) {
+                            logger.warn("[LLM:GEMINI] Prompt blocked. blockReason={}, safetyRatings={}, model={}",
+                                    pf.get("blockReason").asText(), stringifySafetyRatings(pf), chatResponse.getModel());
+                        }
+                    }
+                    if (isAbnormalFinishReason(chatResponse.getFinishReason()) && jsonNode.has("candidates")
+                            && jsonNode.get("candidates").size() > 0) {
+                        final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
+                        final String safetyDetail = stringifySafetyRatings(firstCandidate);
+                        if (safetyDetail != null) {
+                            logger.warn("[LLM:GEMINI] Candidate safety ratings. finishReason={}, safetyRatings={}, model={}",
+                                    chatResponse.getFinishReason(), safetyDetail, chatResponse.getModel());
+                        }
+                    }
+
+                    return chatResponse;
+                }
+            });
         } catch (final LlmException e) {
             throw e;
         } catch (final Exception e) {
@@ -321,231 +327,242 @@ public class GeminiLlmClient extends AbstractLlmClient {
             httpRequest.addHeader("x-goog-api-key", getApiKey());
             httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
 
-            try (var response = getHttpClient().execute(httpRequest)) {
-                final int statusCode = response.getCode();
-                if (logger.isDebugEnabled()) {
-                    final var ctHeader = response.getFirstHeader("Content-Type");
-                    logger.debug("[LLM:GEMINI] streamGenerateContent http response. statusCode={}, contentType={}", statusCode,
-                            ctHeader != null ? ctHeader.getValue() : null);
-                }
-                if (statusCode < 200 || statusCode >= 300) {
-                    String errorBody = "";
-                    if (response.getEntity() != null) {
-                        try {
-                            errorBody = EntityUtils.toString(response.getEntity());
-                        } catch (final IOException | ParseException e) {
-                            // ignore
-                        }
+            executeWithRetry("streamChat", () -> {
+                try (var response = getHttpClient().execute(httpRequest)) {
+                    final int statusCode = response.getCode();
+                    if (logger.isDebugEnabled()) {
+                        final var ctHeader = response.getFirstHeader("Content-Type");
+                        logger.debug("[LLM:GEMINI] streamGenerateContent http response. statusCode={}, contentType={}", statusCode,
+                                ctHeader != null ? ctHeader.getValue() : null);
                     }
-                    logger.warn("[LLM:GEMINI] Streaming API error. url={}, statusCode={}, message={}, body={}", maskApiKeyInUrl(url),
-                            statusCode, response.getReasonPhrase(), errorBody);
-                    throw new LlmException("Gemini API error: " + statusCode + " " + response.getReasonPhrase(),
-                            resolveErrorCode(statusCode));
-                }
-
-                if (response.getEntity() == null) {
-                    logger.warn("[LLM:GEMINI] Empty response from Gemini streaming API. url={}", maskApiKeyInUrl(url));
-                    throw new LlmException("Empty response from Gemini");
-                }
-
-                int chunkCount = 0;
-                int objectCount = 0;
-                long firstChunkTime = 0;
-                String lastFinishReason = null;
-                String lastResponseId = null;
-                String lastBlockReason = null;
-                String lastSafetyRatings = null;
-                Integer promptTokenCount = null;
-                Integer cachedContentTokenCount = null;
-                Integer candidatesTokenCount = null;
-                Integer thoughtsTokenCount = null;
-                Integer totalTokenCount = null;
-                try (BufferedReader reader =
-                        new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
-                    final StringBuilder jsonBuffer = new StringBuilder();
-                    int braceDepth = 0;
-                    boolean inString = false;
-                    boolean streamDone = false;
-
-                    String line;
-                    while ((line = reader.readLine()) != null && !streamDone) {
-                        if (StringUtil.isBlank(line)) {
-                            continue;
+                    if (statusCode < 200 || statusCode >= 300) {
+                        String errorBody = "";
+                        if (response.getEntity() != null) {
+                            try {
+                                errorBody = EntityUtils.toString(response.getEntity());
+                            } catch (final IOException | ParseException e) {
+                                // ignore
+                            }
                         }
-                        // SSE comment line, e.g. ": keepalive"
-                        if (line.charAt(0) == ':') {
-                            continue;
+                        logger.warn("[LLM:GEMINI] Streaming API error. url={}, statusCode={}, message={}, body={}", maskApiKeyInUrl(url),
+                                statusCode, response.getReasonPhrase(), errorBody);
+                        if (isRetryableStatus(statusCode)) {
+                            throw new RetryableHttpException(statusCode, response.getReasonPhrase());
                         }
-                        // SSE terminator sometimes used by proxies / older deployments
-                        final String trimmed = line.trim();
-                        if ("data: [DONE]".equals(trimmed) || "[DONE]".equals(trimmed)) {
-                            streamDone = true;
-                            continue;
-                        }
+                        throw new LlmException("Gemini API error: " + statusCode + " " + response.getReasonPhrase(),
+                                resolveErrorCode(statusCode));
+                    }
 
-                        for (int ci = 0; ci < line.length() && !streamDone; ci++) {
-                            final char c = line.charAt(ci);
+                    if (response.getEntity() == null) {
+                        logger.warn("[LLM:GEMINI] Empty response from Gemini streaming API. url={}", maskApiKeyInUrl(url));
+                        throw new LlmException("Empty response from Gemini");
+                    }
 
-                            if (braceDepth == 0) {
-                                // Outside JSON object - skip array-level delimiters
-                                if (c == '{') {
-                                    braceDepth = 1;
-                                    jsonBuffer.setLength(0);
-                                    jsonBuffer.append(c);
-                                }
+                    int chunkCount = 0;
+                    int objectCount = 0;
+                    long firstChunkTime = 0;
+                    String lastFinishReason = null;
+                    String lastResponseId = null;
+                    String lastBlockReason = null;
+                    String lastSafetyRatings = null;
+                    Integer promptTokenCount = null;
+                    Integer cachedContentTokenCount = null;
+                    Integer candidatesTokenCount = null;
+                    Integer thoughtsTokenCount = null;
+                    Integer totalTokenCount = null;
+                    try (BufferedReader reader =
+                            new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
+                        final StringBuilder jsonBuffer = new StringBuilder();
+                        int braceDepth = 0;
+                        boolean inString = false;
+                        boolean streamDone = false;
+
+                        String line;
+                        while ((line = reader.readLine()) != null && !streamDone) {
+                            if (StringUtil.isBlank(line)) {
+                                continue;
+                            }
+                            // SSE comment line, e.g. ": keepalive"
+                            if (line.charAt(0) == ':') {
+                                continue;
+                            }
+                            // SSE terminator sometimes used by proxies / older deployments
+                            final String trimmed = line.trim();
+                            if ("data: [DONE]".equals(trimmed) || "[DONE]".equals(trimmed)) {
+                                streamDone = true;
                                 continue;
                             }
 
-                            // Inside JSON object
-                            jsonBuffer.append(c);
+                            for (int ci = 0; ci < line.length() && !streamDone; ci++) {
+                                final char c = line.charAt(ci);
 
-                            if (inString) {
-                                if (c == '\\') {
-                                    // Escape sequence - append next char(s) and skip
-                                    ci++;
-                                    if (ci < line.length()) {
-                                        final char escaped = line.charAt(ci);
-                                        jsonBuffer.append(escaped);
-                                        if (escaped == 'u') {
-                                            // Unicode escape sequence - skip 4 hex digits
-                                            final int end = Math.min(ci + 4, line.length() - 1);
-                                            for (int ui = ci + 1; ui <= end; ui++) {
-                                                jsonBuffer.append(line.charAt(ui));
-                                            }
-                                            ci = end;
-                                        }
-                                    }
-                                } else if (c == '"') {
-                                    inString = false;
-                                }
-                            } else {
-                                if (c == '"') {
-                                    inString = true;
-                                } else if (c == '{') {
-                                    braceDepth++;
-                                } else if (c == '}') {
-                                    braceDepth--;
-                                    if (braceDepth == 0) {
-                                        // Complete JSON object accumulated
-                                        final String jsonStr = jsonBuffer.toString();
+                                if (braceDepth == 0) {
+                                    // Outside JSON object - skip array-level delimiters
+                                    if (c == '{') {
+                                        braceDepth = 1;
                                         jsonBuffer.setLength(0);
+                                        jsonBuffer.append(c);
+                                    }
+                                    continue;
+                                }
 
-                                        try {
-                                            final JsonNode jsonNode = objectMapper.readTree(jsonStr);
-                                            objectCount++;
-                                            if (logger.isDebugEnabled()) {
-                                                logger.debug("[LLM:GEMINI] streamObject#{} json={}", objectCount, jsonStr);
-                                            }
-                                            if (jsonNode.has("responseId") && !jsonNode.get("responseId").isNull()) {
-                                                lastResponseId = jsonNode.get("responseId").asText();
-                                            }
-                                            if (jsonNode.has("promptFeedback")) {
-                                                final JsonNode pf = jsonNode.get("promptFeedback");
-                                                if (pf.has("blockReason") && !pf.get("blockReason").isNull()) {
-                                                    lastBlockReason = pf.get("blockReason").asText();
-                                                }
-                                            }
-                                            if (jsonNode.has("usageMetadata")) {
-                                                final JsonNode usage = jsonNode.get("usageMetadata");
-                                                if (usage.has("promptTokenCount")) {
-                                                    promptTokenCount = usage.get("promptTokenCount").asInt();
-                                                }
-                                                if (usage.has("cachedContentTokenCount")) {
-                                                    cachedContentTokenCount = usage.get("cachedContentTokenCount").asInt();
-                                                }
-                                                if (usage.has("candidatesTokenCount")) {
-                                                    candidatesTokenCount = usage.get("candidatesTokenCount").asInt();
-                                                }
-                                                if (usage.has("thoughtsTokenCount")) {
-                                                    thoughtsTokenCount = usage.get("thoughtsTokenCount").asInt();
-                                                }
-                                                if (usage.has("totalTokenCount")) {
-                                                    totalTokenCount = usage.get("totalTokenCount").asInt();
-                                                }
-                                            }
+                                // Inside JSON object
+                                jsonBuffer.append(c);
 
-                                            boolean done = false;
-                                            if (jsonNode.has("candidates") && jsonNode.get("candidates").isArray()
-                                                    && jsonNode.get("candidates").size() > 0) {
-                                                final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
-                                                final String safetyDetail = stringifySafetyRatings(firstCandidate);
-                                                if (safetyDetail != null) {
-                                                    lastSafetyRatings = safetyDetail;
+                                if (inString) {
+                                    if (c == '\\') {
+                                        // Escape sequence - append next char(s) and skip
+                                        ci++;
+                                        if (ci < line.length()) {
+                                            final char escaped = line.charAt(ci);
+                                            jsonBuffer.append(escaped);
+                                            if (escaped == 'u') {
+                                                // Unicode escape sequence - skip 4 hex digits
+                                                final int end = Math.min(ci + 4, line.length() - 1);
+                                                for (int ui = ci + 1; ui <= end; ui++) {
+                                                    jsonBuffer.append(line.charAt(ui));
                                                 }
-                                                final String reason = extractFinishReason(firstCandidate);
-                                                if (reason != null) {
-                                                    lastFinishReason = reason;
-                                                    done = true;
+                                                ci = end;
+                                            }
+                                        }
+                                    } else if (c == '"') {
+                                        inString = false;
+                                    }
+                                } else {
+                                    if (c == '"') {
+                                        inString = true;
+                                    } else if (c == '{') {
+                                        braceDepth++;
+                                    } else if (c == '}') {
+                                        braceDepth--;
+                                        if (braceDepth == 0) {
+                                            // Complete JSON object accumulated
+                                            final String jsonStr = jsonBuffer.toString();
+                                            jsonBuffer.setLength(0);
+
+                                            try {
+                                                final JsonNode jsonNode = objectMapper.readTree(jsonStr);
+                                                objectCount++;
+                                                if (logger.isDebugEnabled()) {
+                                                    logger.debug("[LLM:GEMINI] streamObject#{} json={}", objectCount, jsonStr);
+                                                }
+                                                if (jsonNode.has("responseId") && !jsonNode.get("responseId").isNull()) {
+                                                    lastResponseId = jsonNode.get("responseId").asText();
+                                                }
+                                                if (jsonNode.has("promptFeedback")) {
+                                                    final JsonNode pf = jsonNode.get("promptFeedback");
+                                                    if (pf.has("blockReason") && !pf.get("blockReason").isNull()) {
+                                                        lastBlockReason = pf.get("blockReason").asText();
+                                                    }
+                                                }
+                                                if (jsonNode.has("usageMetadata")) {
+                                                    final JsonNode usage = jsonNode.get("usageMetadata");
+                                                    if (usage.has("promptTokenCount")) {
+                                                        promptTokenCount = usage.get("promptTokenCount").asInt();
+                                                    }
+                                                    if (usage.has("cachedContentTokenCount")) {
+                                                        cachedContentTokenCount = usage.get("cachedContentTokenCount").asInt();
+                                                    }
+                                                    if (usage.has("candidatesTokenCount")) {
+                                                        candidatesTokenCount = usage.get("candidatesTokenCount").asInt();
+                                                    }
+                                                    if (usage.has("thoughtsTokenCount")) {
+                                                        thoughtsTokenCount = usage.get("thoughtsTokenCount").asInt();
+                                                    }
+                                                    if (usage.has("totalTokenCount")) {
+                                                        totalTokenCount = usage.get("totalTokenCount").asInt();
+                                                    }
                                                 }
 
-                                                if (firstCandidate.has("content") && firstCandidate.get("content").has("parts")) {
-                                                    final JsonNode parts = firstCandidate.get("content").get("parts");
-                                                    boolean textSent = false;
-                                                    if (parts.isArray()) {
-                                                        for (int pi = 0; pi < parts.size(); pi++) {
-                                                            final JsonNode part = parts.get(pi);
-                                                            // Skip thinking parts
-                                                            if (part.has("thought") && part.get("thought").asBoolean(false)) {
-                                                                continue;
-                                                            }
-                                                            if (part.has("text")) {
-                                                                callback.onChunk(part.get("text").asText(), done);
-                                                                if (chunkCount == 0) {
-                                                                    firstChunkTime = System.currentTimeMillis() - startTime;
+                                                boolean done = false;
+                                                if (jsonNode.has("candidates") && jsonNode.get("candidates").isArray()
+                                                        && jsonNode.get("candidates").size() > 0) {
+                                                    final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
+                                                    final String safetyDetail = stringifySafetyRatings(firstCandidate);
+                                                    if (safetyDetail != null) {
+                                                        lastSafetyRatings = safetyDetail;
+                                                    }
+                                                    final String reason = extractFinishReason(firstCandidate);
+                                                    if (reason != null) {
+                                                        lastFinishReason = reason;
+                                                        done = true;
+                                                    }
+
+                                                    if (firstCandidate.has("content") && firstCandidate.get("content").has("parts")) {
+                                                        final JsonNode parts = firstCandidate.get("content").get("parts");
+                                                        boolean textSent = false;
+                                                        if (parts.isArray()) {
+                                                            for (int pi = 0; pi < parts.size(); pi++) {
+                                                                final JsonNode part = parts.get(pi);
+                                                                // Skip thinking parts
+                                                                if (part.has("thought") && part.get("thought").asBoolean(false)) {
+                                                                    continue;
                                                                 }
-                                                                chunkCount++;
-                                                                textSent = true;
+                                                                if (part.has("text")) {
+                                                                    callback.onChunk(part.get("text").asText(), done);
+                                                                    if (chunkCount == 0) {
+                                                                        firstChunkTime = System.currentTimeMillis() - startTime;
+                                                                    }
+                                                                    chunkCount++;
+                                                                    textSent = true;
+                                                                }
                                                             }
                                                         }
-                                                    }
-                                                    if (done && !textSent) {
+                                                        if (done && !textSent) {
+                                                            callback.onChunk("", true);
+                                                        }
+                                                    } else if (done) {
                                                         callback.onChunk("", true);
                                                     }
-                                                } else if (done) {
-                                                    callback.onChunk("", true);
-                                                }
 
-                                                if (done) {
-                                                    streamDone = true;
+                                                    if (done) {
+                                                        streamDone = true;
+                                                    }
                                                 }
+                                            } catch (final JsonProcessingException e) {
+                                                logger.warn("[LLM:GEMINI] Failed to parse streaming response. json={}", jsonStr, e);
                                             }
-                                        } catch (final JsonProcessingException e) {
-                                            logger.warn("[LLM:GEMINI] Failed to parse streaming response. json={}", jsonStr, e);
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                final long elapsed = System.currentTimeMillis() - startTime;
-                logger.info(
-                        "[LLM:GEMINI] Stream completed. chunkCount={}, objectCount={}, firstChunkMs={}, elapsedTime={}ms, responseId={}, finishReason={}, promptTokens={}, cachedContentTokens={}, candidatesTokens={}, thoughtsTokens={}, totalTokens={}",
-                        chunkCount, objectCount, firstChunkTime, elapsed, lastResponseId, lastFinishReason, promptTokenCount,
-                        cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount, totalTokenCount);
-                if (isAbnormalFinishReason(lastFinishReason)) {
-                    logger.warn(
-                            "[LLM:GEMINI] Stream finished abnormally. responseId={}, finishReason={}, chunkCount={}, candidatesTokens={}, thoughtsTokens={}, model={}",
-                            lastResponseId, lastFinishReason, chunkCount, candidatesTokenCount, thoughtsTokenCount, model);
+                    final long elapsed = System.currentTimeMillis() - startTime;
+                    logger.info(
+                            "[LLM:GEMINI] Stream completed. chunkCount={}, objectCount={}, firstChunkMs={}, elapsedTime={}ms, responseId={}, finishReason={}, promptTokens={}, cachedContentTokens={}, candidatesTokens={}, thoughtsTokens={}, totalTokens={}",
+                            chunkCount, objectCount, firstChunkTime, elapsed, lastResponseId, lastFinishReason, promptTokenCount,
+                            cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount, totalTokenCount);
+                    if (isAbnormalFinishReason(lastFinishReason)) {
+                        logger.warn(
+                                "[LLM:GEMINI] Stream finished abnormally. responseId={}, finishReason={}, chunkCount={}, candidatesTokens={}, thoughtsTokens={}, model={}",
+                                lastResponseId, lastFinishReason, chunkCount, candidatesTokenCount, thoughtsTokenCount, model);
+                    }
+                    if (lastBlockReason != null) {
+                        logger.warn("[LLM:GEMINI] Stream prompt blocked. blockReason={}, model={}", lastBlockReason, model);
+                    }
+                    if (isAbnormalFinishReason(lastFinishReason) && lastSafetyRatings != null) {
+                        logger.warn("[LLM:GEMINI] Stream candidate safety ratings. finishReason={}, safetyRatings={}, model={}",
+                                lastFinishReason, lastSafetyRatings, model);
+                    }
+                    if (streamSummaryConsumer != null) {
+                        streamSummaryConsumer.accept(new StreamSummary(chunkCount, objectCount, lastFinishReason, lastResponseId,
+                                promptTokenCount, cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount, totalTokenCount,
+                                firstChunkTime, elapsed));
+                    }
+                    return null;
                 }
-                if (lastBlockReason != null) {
-                    logger.warn("[LLM:GEMINI] Stream prompt blocked. blockReason={}, model={}", lastBlockReason, model);
-                }
-                if (isAbnormalFinishReason(lastFinishReason) && lastSafetyRatings != null) {
-                    logger.warn("[LLM:GEMINI] Stream candidate safety ratings. finishReason={}, safetyRatings={}, model={}",
-                            lastFinishReason, lastSafetyRatings, model);
-                }
-                if (streamSummaryConsumer != null) {
-                    streamSummaryConsumer.accept(new StreamSummary(chunkCount, objectCount, lastFinishReason, lastResponseId,
-                            promptTokenCount, cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount, totalTokenCount,
-                            firstChunkTime, elapsed));
-                }
-            }
+            });
         } catch (final LlmException e) {
             callback.onError(e);
             throw e;
         } catch (final IOException e) {
+            logger.warn("[LLM:GEMINI] Failed to stream from Gemini API. url={}, error={}", maskApiKeyInUrl(url), e.getMessage(), e);
+            final LlmException llmException = new LlmException("Failed to stream from Gemini API", LlmException.ERROR_CONNECTION, e);
+            callback.onError(llmException);
+            throw llmException;
+        } catch (final ParseException e) {
             logger.warn("[LLM:GEMINI] Failed to stream from Gemini API. url={}, error={}", maskApiKeyInUrl(url), e.getMessage(), e);
             final LlmException llmException = new LlmException("Failed to stream from Gemini API", LlmException.ERROR_CONNECTION, e);
             callback.onError(llmException);
@@ -993,6 +1010,132 @@ public class GeminiLlmClient extends AbstractLlmClient {
             return "MEDIUM";
         }
         return "HIGH";
+    }
+
+    /**
+     * Returns the maximum number of attempts (initial + retries) for a single HTTP call.
+     * Configured via {@code rag.llm.gemini.retry.max} (default {@code 3}).
+     *
+     * @return the maximum number of attempts.
+     */
+    protected int getRetryMaxAttempts() {
+        return getConfigInt("retry.max", 3);
+    }
+
+    /**
+     * Returns the base delay in milliseconds for exponential backoff between retries.
+     * Configured via {@code rag.llm.gemini.retry.base.delay.ms} (default {@code 2000}).
+     *
+     * @return the base retry delay in milliseconds.
+     */
+    protected long getRetryBaseDelayMs() {
+        return Long.parseLong(ComponentUtil.getFessConfig().getOrDefault(getConfigPrefix() + ".retry.base.delay.ms", "2000"));
+    }
+
+    /**
+     * Functional interface for the retryable HTTP call body executed by {@link #executeWithRetry}.
+     *
+     * @param <T> the call result type.
+     */
+    @FunctionalInterface
+    interface HttpCall<T> {
+        /**
+         * Executes the HTTP call.
+         *
+         * @return the call result.
+         * @throws IOException on I/O failure.
+         * @throws ParseException on response parse failure.
+         */
+        T call() throws IOException, ParseException;
+    }
+
+    /**
+     * Executes {@code call} with retry on {@link RetryableHttpException}. {@link IOException},
+     * {@link ParseException}, and {@link LlmException} (RuntimeException, NOT caught here) are
+     * all propagated immediately without retry. Backoff is exponential
+     * ({@code base * 2^(attempt-1)}) with ±20% jitter. Sleep duration honors
+     * {@link #getRetryBaseDelayMs()} and the cap is {@link #getRetryMaxAttempts()}.
+     *
+     * @param operation the operation label used in log messages (e.g. {@code "chat"}).
+     * @param call the HTTP call body.
+     * @param <T> the call result type.
+     * @return the call result on success.
+     * @throws IOException if the call throws a non-retryable {@link IOException} or the retry
+     *             budget is exhausted.
+     * @throws ParseException if the call throws {@link ParseException}.
+     */
+    private <T> T executeWithRetry(final String operation, final HttpCall<T> call) throws IOException, ParseException {
+        final int maxAttempts = Math.max(1, getRetryMaxAttempts());
+        final long baseDelay = Math.max(0L, getRetryBaseDelayMs());
+        IOException lastIo = null;
+        ParseException lastParse = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return call.call();
+            } catch (final RetryableHttpException e) {
+                if (attempt == maxAttempts) {
+                    logger.warn("[LLM:GEMINI] {} retry exhausted. attempts={}, lastStatus={}", operation, attempt, e.statusCode);
+                    throw new IOException("Gemini API retryable error: " + e.statusCode + " " + e.reason, e);
+                }
+                final long jitter = (long) (baseDelay * 0.2 * (Math.random() * 2 - 1)); // ±20%
+                final long delay = (long) (baseDelay * Math.pow(2, attempt - 1)) + jitter;
+                logger.info("[LLM:GEMINI] {} retrying. attempt={}/{}, status={}, sleepMs={}", operation, attempt, maxAttempts, e.statusCode,
+                        Math.max(0, delay));
+                try {
+                    Thread.sleep(Math.max(0, delay));
+                } catch (final InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Retry interrupted", ie);
+                }
+            } catch (final IOException e) {
+                lastIo = e;
+                break;
+            } catch (final ParseException e) {
+                lastParse = e;
+                break;
+            }
+        }
+        if (lastIo != null) {
+            throw lastIo;
+        }
+        throw lastParse;
+    }
+
+    /**
+     * Internal signaling exception thrown by the HTTP call body to indicate that the
+     * received status code is retryable (per {@link #isRetryableStatus(int)}). Caught by
+     * {@link #executeWithRetry(String, HttpCall)}; never escapes the client.
+     */
+    static final class RetryableHttpException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+        /** The HTTP status code that triggered the retry. */
+        final int statusCode;
+        /** The HTTP reason phrase associated with {@link #statusCode}. */
+        final String reason;
+
+        /**
+         * Creates a new {@code RetryableHttpException}.
+         *
+         * @param statusCode the HTTP status code.
+         * @param reason the HTTP reason phrase.
+         */
+        RetryableHttpException(final int statusCode, final String reason) {
+            super("retryable http error: " + statusCode + " " + reason);
+            this.statusCode = statusCode;
+            this.reason = reason;
+        }
+    }
+
+    /**
+     * Returns whether the given HTTP status code should be retried. Retryable statuses
+     * are {@code 429} (RESOURCE_EXHAUSTED), {@code 500} (INTERNAL),
+     * {@code 503} (UNAVAILABLE), and {@code 504} (DEADLINE_EXCEEDED).
+     *
+     * @param statusCode the HTTP status code.
+     * @return {@code true} when the status is retryable.
+     */
+    static boolean isRetryableStatus(final int statusCode) {
+        return statusCode == 429 || statusCode == 500 || statusCode == 503 || statusCode == 504;
     }
 
 }
