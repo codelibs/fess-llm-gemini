@@ -63,6 +63,35 @@ Enable `org.codelibs.fess.llm.gemini` at DEBUG level to additionally log:
 - HTTP status + `Content-Type` of the streaming response,
 - each parsed JSON object from the stream (`streamObject#N json=`).
 
+The completion line additionally records `responseId` for request
+correlation and `cachedContentTokens` when context caching is in use.
+WARN lines are also emitted for `promptFeedback.blockReason` (input
+blocked) and for candidate `safetyRatings` whenever the response stops on
+an abnormal `finishReason` such as `SAFETY` / `LANGUAGE` / `RECITATION` /
+`PROHIBITED_CONTENT`.
+
+### Auth & retries
+
+Gemini API key is sent as the `x-goog-api-key` HTTP header (recommended by
+Google), not via `?key=` query parameter — keys never appear in URL logs.
+
+Retries: HTTP `429`, `500`, `503`, `504` are retried up to
+`rag.llm.gemini.retry.max` times (default `3`) with exponential backoff
+starting at `rag.llm.gemini.retry.base.delay.ms` (default `2000`) and ±20%
+jitter. Streaming retries only the initial connect — once the response body
+starts flowing, partial-stream errors propagate immediately.
+
+### Model-aware thinking
+
+`thinkingBudget` (integer, Gemini 2.x) and `thinkingLevel` (`LOW`/`MEDIUM`/
+`HIGH`, Gemini 3.x) are mutually exclusive on the wire. The client detects
+the model generation by ID prefix and translates the request-level
+`thinkingBudget` to the appropriate field:
+
+- Gemini 2.x: `thinkingBudget` is sent as-is.
+- Gemini 3.x: `thinkingBudget` is mapped to `thinkingLevel`
+  (`<=0` → `LOW`, `<=4096` → `MEDIUM`, `>4096` → `HIGH`).
+
 ### Default generation parameters
 
 Streaming-output prompt types (`direct`, `faq`, `answer`, `summary`) default to
