@@ -252,6 +252,11 @@ public class GeminiLlmClient extends AbstractLlmClient {
                         chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
                         chatResponse.getTotalTokens(), chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
                         System.currentTimeMillis() - startTime);
+                if (isAbnormalFinishReason(chatResponse.getFinishReason())) {
+                    logger.warn("[LLM:GEMINI] Chat finished abnormally. finishReason={}, contentLength={}, model={}",
+                            chatResponse.getFinishReason(), chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
+                            chatResponse.getModel());
+                }
 
                 return chatResponse;
             }
