@@ -290,6 +290,11 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
             try (var response = getHttpClient().execute(httpRequest)) {
                 final int statusCode = response.getCode();
+                if (logger.isDebugEnabled()) {
+                    final var ctHeader = response.getFirstHeader("Content-Type");
+                    logger.debug("[LLM:GEMINI] streamGenerateContent http response. statusCode={}, contentType={}", statusCode,
+                            ctHeader != null ? ctHeader.getValue() : null);
+                }
                 if (statusCode < 200 || statusCode >= 300) {
                     String errorBody = "";
                     if (response.getEntity() != null) {

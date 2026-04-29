@@ -1093,6 +1093,34 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_streamChat_acceptsApplicationJsonArray() throws IOException {
+        // Backwards-compat: when alt=sse is overridden by config or proxy, server may still serve an array
+        final String streamResponse = """
+                [
+                {"candidates":[{"content":{"parts":[{"text":"A"}],"role":"model"},"finishReason":"STOP"}]}
+                ]
+                """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hi");
+        final List<String> chunks = new ArrayList<>();
+        client.streamChat(request, new LlmStreamCallback() {
+            @Override
+            public void onChunk(final String content, final boolean done) {
+                chunks.add(content);
+            }
+
+            @Override
+            public void onError(final Throwable error) {
+                fail("Unexpected: " + error.getMessage());
+            }
+        });
+        assertEquals(1, chunks.size());
+        assertEquals("A", chunks.get(0));
+    }
+
+    @Test
     public void test_streamChat_malformedJson() throws IOException {
         final String streamResponse = """
                 [
