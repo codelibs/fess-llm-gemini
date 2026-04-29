@@ -141,8 +141,9 @@ public class GeminiLlmClient extends AbstractLlmClient {
             return false;
         }
         try {
-            final String url = apiUrl + "/models?key=" + apiKey;
+            final String url = apiUrl + "/models";
             final HttpGet request = new HttpGet(url);
+            request.addHeader("x-goog-api-key", apiKey);
             try (var response = getHttpClient().execute(request)) {
                 final int statusCode = response.getCode();
                 final boolean available = statusCode >= 200 && statusCode < 300;
@@ -178,6 +179,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 logger.debug("[LLM:GEMINI] requestBody={}", json);
             }
             final HttpPost httpRequest = new HttpPost(url);
+            httpRequest.addHeader("x-goog-api-key", getApiKey());
             httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
 
             try (var response = getHttpClient().execute(httpRequest)) {
@@ -286,6 +288,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 logger.debug("[LLM:GEMINI] requestBody={}", json);
             }
             final HttpPost httpRequest = new HttpPost(url);
+            httpRequest.addHeader("x-goog-api-key", getApiKey());
             httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
 
             try (var response = getHttpClient().execute(httpRequest)) {
@@ -515,17 +518,10 @@ public class GeminiLlmClient extends AbstractLlmClient {
      */
     protected String buildApiUrl(final String model, final boolean stream) {
         final String apiUrl = getApiUrl();
-        final String apiKey = getApiKey();
         final String action = stream ? "streamGenerateContent" : "generateContent";
-        final StringBuilder url = new StringBuilder().append(apiUrl)
-                .append("/models/")
-                .append(model)
-                .append(":")
-                .append(action)
-                .append("?key=")
-                .append(apiKey);
+        final StringBuilder url = new StringBuilder().append(apiUrl).append("/models/").append(model).append(":").append(action);
         if (stream) {
-            url.append("&alt=sse");
+            url.append("?alt=sse");
         }
         return url.toString();
     }

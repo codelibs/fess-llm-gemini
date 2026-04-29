@@ -285,7 +285,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
         final String url = client.buildApiUrl("gemini-2.5-flash", false);
 
-        assertEquals("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=test-key", url);
+        assertEquals("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent", url);
     }
 
     @Test
@@ -295,8 +295,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
         final String url = client.buildApiUrl("gemini-2.5-flash", true);
 
-        assertEquals("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=test-key&alt=sse",
-                url);
+        assertEquals("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse", url);
     }
 
     @Test
@@ -1300,7 +1299,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         final RecordedRequest recorded = mockServer.takeRequest();
         assertEquals("POST", recorded.getMethod());
         assertTrue(recorded.getPath().contains("/models/gemini-2.0-flash:generateContent"));
-        assertTrue(recorded.getPath().contains("key=test-key"));
+        assertFalse("API key MUST NOT be in path: " + recorded.getPath(), recorded.getPath().contains("key="));
+        assertEquals("test-key", recorded.getHeader("x-goog-api-key"));
         assertEquals("application/json; charset=UTF-8", recorded.getHeader("Content-Type"));
 
         // Verify body contains expected structure
@@ -1335,7 +1335,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         final RecordedRequest recorded = mockServer.takeRequest();
         assertEquals("POST", recorded.getMethod());
         assertTrue(recorded.getPath().contains("/models/gemini-2.0-flash:streamGenerateContent"));
-        assertTrue(recorded.getPath().contains("key=test-key"));
+        assertFalse("API key MUST NOT be in path: " + recorded.getPath(), recorded.getPath().contains("key="));
+        assertEquals("test-key", recorded.getHeader("x-goog-api-key"));
     }
 
     // ========== checkAvailabilityNow() tests ==========
@@ -1351,7 +1352,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         final RecordedRequest recorded = mockServer.takeRequest();
         assertEquals("GET", recorded.getMethod());
         assertTrue(recorded.getPath().contains("/models"));
-        assertTrue(recorded.getPath().contains("key=test-key"));
+        assertFalse("API key MUST NOT be in path: " + recorded.getPath(), recorded.getPath().contains("key="));
+        assertEquals("test-key", recorded.getHeader("x-goog-api-key"));
     }
 
     @Test
@@ -1658,8 +1660,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
     public void test_buildApiUrl_streamingUsesAltSse() {
         setupClientForMockServer();
         final String url = client.testBuildApiUrl("gemini-2.5-flash", true);
-        assertTrue("expected ?alt=sse in URL but was: " + url, url.contains("alt=sse"));
-        assertTrue("expected key parameter in URL", url.contains("key="));
+        assertTrue("expected ?alt=sse but was: " + url, url.contains("alt=sse"));
+        assertFalse("API key MUST NOT be in URL: " + url, url.contains("key="));
         assertTrue("expected streamGenerateContent action", url.contains(":streamGenerateContent"));
     }
 
@@ -1668,7 +1670,25 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         setupClientForMockServer();
         final String url = client.testBuildApiUrl("gemini-2.5-flash", false);
         assertFalse("non-stream URL should NOT carry alt=sse: " + url, url.contains("alt=sse"));
+        assertFalse("API key MUST NOT be in URL: " + url, url.contains("key="));
         assertTrue(url.contains(":generateContent"));
+    }
+
+    @Test
+    public void test_chat_sendsApiKeyAsHeader() throws Exception {
+        final String responseJson = """
+                {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}
+                """;
+        mockServer.enqueue(new MockResponse().setBody(responseJson).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi");
+        client.chat(request);
+
+        final RecordedRequest recorded = mockServer.takeRequest();
+        assertEquals("test-key", recorded.getHeader("x-goog-api-key"));
+        // The path/query should NOT contain key=
+        assertFalse("API key MUST NOT appear in path: " + recorded.getPath(), recorded.getPath().contains("key="));
     }
 
     @Test
