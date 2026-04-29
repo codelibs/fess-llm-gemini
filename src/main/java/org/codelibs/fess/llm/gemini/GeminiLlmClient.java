@@ -714,7 +714,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setMaxTokens(2048);
             }
             if (request.getThinkingBudget() == null) {
-                request.setThinkingBudget(1024);
+                request.setThinkingBudget(0);
             }
             break;
         case "answer":
@@ -736,7 +736,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setMaxTokens(4096);
             }
             if (request.getThinkingBudget() == null) {
-                request.setThinkingBudget(2048);
+                request.setThinkingBudget(0);
             }
             break;
         case "queryregeneration":

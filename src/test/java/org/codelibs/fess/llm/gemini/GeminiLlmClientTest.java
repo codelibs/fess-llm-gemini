@@ -2055,7 +2055,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         client.testApplyDefaultParams(request, "direct");
         assertEquals(Double.valueOf(0.7), request.getTemperature());
         assertEquals(Integer.valueOf(2048), request.getMaxTokens());
-        assertEquals(Integer.valueOf(1024), request.getThinkingBudget());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
     }
 
     @Test
@@ -2064,7 +2064,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         client.testApplyDefaultParams(request, "faq");
         assertEquals(Double.valueOf(0.7), request.getTemperature());
         assertEquals(Integer.valueOf(2048), request.getMaxTokens());
-        assertEquals(Integer.valueOf(1024), request.getThinkingBudget());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
     }
 
     @Test
@@ -2082,7 +2082,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         client.testApplyDefaultParams(request, "summary");
         assertEquals(Double.valueOf(0.3), request.getTemperature());
         assertEquals(Integer.valueOf(4096), request.getMaxTokens());
-        assertEquals(Integer.valueOf(2048), request.getThinkingBudget());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
     }
 
     @Test
