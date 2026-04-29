@@ -17,16 +17,23 @@ package org.codelibs.fess.llm.gemini;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.codelibs.fess.llm.LlmChatRequest;
 import org.codelibs.fess.llm.LlmChatResponse;
 import org.codelibs.fess.llm.LlmException;
 import org.codelibs.fess.llm.LlmMessage;
 import org.codelibs.fess.llm.LlmStreamCallback;
+import org.codelibs.fess.llm.gemini.GeminiLlmClient.StreamSummary;
 import org.codelibs.fess.unit.UnitFessTestCase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
@@ -958,6 +965,47 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_streamChat_logsFinishReasonAndUsage() throws IOException {
+        final String streamResponse =
+                """
+                        [
+                        {"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]},
+                        {"candidates":[{"content":{"parts":[{"text":" world"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":2,"totalTokenCount":14,"thoughtsTokenCount":0}}
+                        ]
+                        """;
+
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "text/event-stream"));
+        setupClientForMockServer();
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hi");
+        final List<String> chunks = new ArrayList<>();
+        final AtomicReference<StreamSummary> summaryRef = new AtomicReference<>();
+
+        client.setStreamSummaryConsumer(summaryRef::set);
+
+        client.streamChat(request, new LlmStreamCallback() {
+            @Override
+            public void onChunk(final String content, final boolean done) {
+                chunks.add(content);
+            }
+
+            @Override
+            public void onError(final Throwable error) {
+                fail("Unexpected: " + error.getMessage());
+            }
+        });
+
+        assertEquals(2, chunks.size());
+        final StreamSummary s = summaryRef.get();
+        assertNotNull(s);
+        assertEquals("STOP", s.finishReason);
+        assertEquals(2, s.objectCount);
+        assertEquals(2, s.chunkCount);
+        assertEquals(Integer.valueOf(2), s.candidatesTokenCount);
+        assertEquals(Integer.valueOf(0), s.thoughtsTokenCount);
+    }
+
+    @Test
     public void test_streamChat_malformedJson() throws IOException {
         final String streamResponse = """
                 [
@@ -1461,6 +1509,254 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         assertNull(response.getContent());
     }
 
+    // ========== Stream completion log diagnostics tests ==========
+    // These tests verify that streamChat emits finishReason and usageMetadata
+    // in its "Stream completed" INFO log so that 1-character / truncated-response
+    // cases (MAX_TOKENS, SAFETY, RECITATION, thinking-budget exhaustion) are
+    // distinguishable from chunk count alone.
+
+    @Test
+    public void test_streamChat_logIncludesFinishReasonStop() throws IOException {
+        final String streamResponse = """
+                [
+                {"candidates":[{"content":{"parts":[{"text":"Hi"}]},"finishReason":"STOP"}]}
+                ]
+                """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            client.streamChat(new LlmChatRequest().addUserMessage("Hello"), new NoopCallback());
+        });
+
+        final String completed = findCompletionLog(messages);
+        assertNotNull(completed, "Stream completed log not emitted");
+        assertTrue(completed.contains("finishReason=STOP"), "missing finishReason=STOP: " + completed);
+    }
+
+    @Test
+    public void test_streamChat_logIncludesFinishReasonMaxTokens() throws IOException {
+        final String streamResponse = """
+                [
+                {"candidates":[{"content":{"parts":[{"text":"!"}]},"finishReason":"MAX_TOKENS"}]}
+                ]
+                """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            client.streamChat(new LlmChatRequest().addUserMessage("Hello"), new NoopCallback());
+        });
+
+        final String completed = findCompletionLog(messages);
+        assertNotNull(completed, "Stream completed log not emitted");
+        assertTrue(completed.contains("finishReason=MAX_TOKENS"), "missing finishReason=MAX_TOKENS: " + completed);
+    }
+
+    @Test
+    public void test_streamChat_logIncludesFinishReasonSafety() throws IOException {
+        // SAFETY may arrive without any text parts
+        final String streamResponse = """
+                [
+                {"candidates":[{"finishReason":"SAFETY"}]}
+                ]
+                """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final List<String> messages = new ArrayList<>();
+        final AtomicBoolean doneReceived = new AtomicBoolean(false);
+        runStreamWithCapturedLogs(messages, () -> {
+            client.streamChat(new LlmChatRequest().addUserMessage("Hello"), new LlmStreamCallback() {
+                @Override
+                public void onChunk(final String content, final boolean done) {
+                    if (done) {
+                        doneReceived.set(true);
+                    }
+                }
+
+                @Override
+                public void onError(final Throwable error) {
+                    fail("Unexpected error: " + error.getMessage());
+                }
+            });
+        });
+
+        assertTrue(doneReceived.get(), "done callback not invoked for SAFETY finish");
+        final String completed = findCompletionLog(messages);
+        assertNotNull(completed, "Stream completed log not emitted");
+        assertTrue(completed.contains("finishReason=SAFETY"), "missing finishReason=SAFETY: " + completed);
+    }
+
+    @Test
+    public void test_streamChat_logIncludesUsageMetadata() throws IOException {
+        final String streamResponse = """
+                [
+                {"candidates":[{"content":{"parts":[{"text":"!"}]},"finishReason":"MAX_TOKENS"}],
+                 "usageMetadata":{"promptTokenCount":8192,"candidatesTokenCount":1,"totalTokenCount":8193}}
+                ]
+                """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            client.streamChat(new LlmChatRequest().addUserMessage("Hello"), new NoopCallback());
+        });
+
+        final String completed = findCompletionLog(messages);
+        assertNotNull(completed, "Stream completed log not emitted");
+        assertTrue(completed.contains("promptTokens=8192"), "missing promptTokens in usage: " + completed);
+        assertTrue(completed.contains("candidatesTokens=1"), "missing candidatesTokens: " + completed);
+        assertTrue(completed.contains("totalTokens=8193"), "missing totalTokens: " + completed);
+    }
+
+    @Test
+    public void test_streamChat_logIncludesThoughtsTokenCount() throws IOException {
+        // Diagnostic case: thinking budget consumed all output → 1-char visible response
+        final String streamResponse = """
+                [
+                {"candidates":[{"content":{"parts":[{"text":"!"}]},"finishReason":"MAX_TOKENS"}],
+                 "usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":1,"thoughtsTokenCount":4095,"totalTokenCount":4216}}
+                ]
+                """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            client.streamChat(new LlmChatRequest().addUserMessage("Hello"), new NoopCallback());
+        });
+
+        final String completed = findCompletionLog(messages);
+        assertNotNull(completed, "Stream completed log not emitted");
+        assertTrue(completed.contains("thoughtsTokens=4095"),
+                "missing thoughtsTokens in usage (needed to diagnose thinking-budget exhaustion): " + completed);
+        assertTrue(completed.contains("finishReason=MAX_TOKENS"), "missing finishReason=MAX_TOKENS: " + completed);
+    }
+
+    @Test
+    public void test_streamChat_logCapturesLastUsageMetadata() throws IOException {
+        // When usageMetadata appears in multiple chunks, the last one (typically richest) wins
+        final String streamResponse = """
+                [
+                {"candidates":[{"content":{"parts":[{"text":"A"}]}}],
+                 "usageMetadata":{"promptTokenCount":100,"totalTokenCount":101}},
+                {"candidates":[{"content":{"parts":[{"text":"B"}]},"finishReason":"STOP"}],
+                 "usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":2,"totalTokenCount":102}}
+                ]
+                """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            client.streamChat(new LlmChatRequest().addUserMessage("Hello"), new NoopCallback());
+        });
+
+        final String completed = findCompletionLog(messages);
+        assertNotNull(completed, "Stream completed log not emitted");
+        // Final usage carries candidatesTokenCount=2 — proves we logged the last, not the first
+        assertTrue(completed.contains("candidatesTokens=2"), "expected last usageMetadata to win, but log was: " + completed);
+        assertTrue(completed.contains("totalTokens=102"), "expected totalTokens=102 in final usage: " + completed);
+    }
+
+    @Test
+    public void test_streamChat_logShowsNullsWhenNoFinishReasonOrUsage() throws IOException {
+        // Stream that ends without any finishReason or usageMetadata.
+        // The log must still be emitted (no NPE) and show the absence explicitly as null.
+        final String streamResponse = """
+                [
+                {"candidates":[{"content":{"parts":[{"text":"Partial"}]}}]}
+                ]
+                """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            client.streamChat(new LlmChatRequest().addUserMessage("Hello"), new NoopCallback());
+        });
+
+        final String completed = findCompletionLog(messages);
+        assertNotNull(completed, "Stream completed log not emitted");
+        assertTrue(completed.contains("finishReason=null"), "expected finishReason=null when absent: " + completed);
+        assertTrue(completed.contains("promptTokens=null"), "expected promptTokens=null when absent: " + completed);
+        assertTrue(completed.contains("candidatesTokens=null"), "expected candidatesTokens=null when absent: " + completed);
+        assertTrue(completed.contains("thoughtsTokens=null"), "expected thoughtsTokens=null when absent: " + completed);
+        assertTrue(completed.contains("totalTokens=null"), "expected totalTokens=null when absent: " + completed);
+    }
+
+    @Test
+    public void test_streamChat_logHandlesJsonNullUsageMetadata() throws IOException {
+        // usageMetadata field present with explicit JSON null — must not throw
+        final String streamResponse = """
+                [
+                {"candidates":[{"content":{"parts":[{"text":"X"}]},"finishReason":"STOP"}],"usageMetadata":null}
+                ]
+                """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            client.streamChat(new LlmChatRequest().addUserMessage("Hello"), new NoopCallback());
+        });
+
+        final String completed = findCompletionLog(messages);
+        assertNotNull(completed, "Stream completed log not emitted");
+        assertTrue(completed.contains("finishReason=STOP"), "missing finishReason=STOP: " + completed);
+        // usageMetadata is JSON null — all individual token fields must remain null
+        assertTrue(completed.contains("promptTokens=null"), "expected promptTokens=null with JSON null usageMetadata: " + completed);
+        assertTrue(completed.contains("candidatesTokens=null"),
+                "expected candidatesTokens=null with JSON null usageMetadata: " + completed);
+        assertTrue(completed.contains("totalTokens=null"), "expected totalTokens=null with JSON null usageMetadata: " + completed);
+    }
+
+    @Test
+    public void test_streamChat_existingChunkBehaviorPreserved() throws IOException {
+        // Regression guard: the diagnostic logging additions must not change the
+        // existing chunk delivery / done-flag contract.
+        final String streamResponse = """
+                [
+                {"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]},
+                {"candidates":[{"content":{"parts":[{"text":" World"}],"role":"model"}}]},
+                {"candidates":[{"content":{"parts":[{"text":"!"}],"role":"model"},"finishReason":"STOP"}],
+                 "usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}}
+                ]
+                """;
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final List<String> chunks = new ArrayList<>();
+        final AtomicBoolean doneReceived = new AtomicBoolean(false);
+        final AtomicInteger doneCount = new AtomicInteger(0);
+        client.streamChat(new LlmChatRequest().addUserMessage("Hello"), new LlmStreamCallback() {
+            @Override
+            public void onChunk(final String content, final boolean done) {
+                chunks.add(content);
+                if (done) {
+                    doneReceived.set(true);
+                    doneCount.incrementAndGet();
+                }
+            }
+
+            @Override
+            public void onError(final Throwable error) {
+                fail("Unexpected error: " + error.getMessage());
+            }
+        });
+
+        assertEquals(3, chunks.size());
+        assertEquals("Hello", chunks.get(0));
+        assertEquals(" World", chunks.get(1));
+        assertEquals("!", chunks.get(2));
+        assertTrue(doneReceived.get(), "done callback not invoked");
+        assertEquals(1, doneCount.get());
+    }
+
     // ========== Helper methods ==========
 
     private void setupClientForMockServer() {
@@ -1474,6 +1770,69 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         client.setTestMaxTokens(4096);
         client.setTestTimeout(30000);
         client.init();
+    }
+
+    /**
+     * Attaches a capturing appender to the GeminiLlmClient logger, runs the action,
+     * then detaches the appender — leaving the logger configuration untouched for
+     * subsequent tests. Captured formatted messages are appended to {@code sink}.
+     */
+    private void runStreamWithCapturedLogs(final List<String> sink, final Runnable action) {
+        final org.apache.logging.log4j.core.Logger coreLogger =
+                (org.apache.logging.log4j.core.Logger) LogManager.getLogger(GeminiLlmClient.class);
+        final CapturingAppender appender = new CapturingAppender();
+        appender.start();
+        coreLogger.addAppender(appender);
+        try {
+            action.run();
+        } finally {
+            coreLogger.removeAppender(appender);
+            appender.stop();
+            sink.addAll(appender.snapshot());
+        }
+    }
+
+    /** Returns the first captured "Stream completed." log line, or null if none. */
+    private static String findCompletionLog(final List<String> messages) {
+        for (final String m : messages) {
+            if (m.contains("Stream completed.")) {
+                return m;
+            }
+        }
+        return null;
+    }
+
+    /** Callback that swallows chunks/done and fails on error — for log-only assertions. */
+    private static final class NoopCallback implements LlmStreamCallback {
+        @Override
+        public void onChunk(final String content, final boolean done) {
+            // no-op
+        }
+
+        @Override
+        public void onError(final Throwable error) {
+            throw new AssertionError("Unexpected onError: " + error.getMessage(), error);
+        }
+    }
+
+    /** Log4j2 appender that records formatted messages for later assertion. */
+    private static final class CapturingAppender extends AbstractAppender {
+        private final List<String> messages = Collections.synchronizedList(new ArrayList<>());
+
+        CapturingAppender() {
+            super("CaptureGeminiLogs-" + System.nanoTime(), null, null, true, Property.EMPTY_ARRAY);
+        }
+
+        @Override
+        public void append(final LogEvent event) {
+            messages.add(event.getMessage().getFormattedMessage());
+        }
+
+        List<String> snapshot() {
+            synchronized (messages) {
+                return new ArrayList<>(messages);
+            }
+        }
     }
 
     // --- applyPromptTypeParams tests ---
@@ -1546,8 +1905,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         final LlmChatRequest request = new LlmChatRequest();
         client.testApplyDefaultParams(request, "answer");
         assertEquals(Double.valueOf(0.5), request.getTemperature());
-        assertEquals(Integer.valueOf(4096), request.getMaxTokens());
-        assertEquals(Integer.valueOf(2048), request.getThinkingBudget());
+        assertEquals(Integer.valueOf(8192), request.getMaxTokens());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
     }
 
     @Test

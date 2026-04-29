@@ -64,6 +64,55 @@ public class GeminiLlmClient extends AbstractLlmClient {
     protected static final String ROLE_MODEL = "model";
 
     /**
+     * Summary of a single streamChat invocation. Exposed for diagnostics, not part of the LLM SPI.
+     */
+    public static final class StreamSummary {
+        /** Number of text chunks delivered to the callback. */
+        public final int chunkCount;
+        /** Number of complete JSON objects parsed from the stream. */
+        public final int objectCount;
+        /** Last observed {@code finishReason} value, or {@code null} if none was reported. */
+        public final String finishReason;
+        /** Last observed {@code promptTokenCount}, or {@code null} if absent. */
+        public final Integer promptTokenCount;
+        /** Last observed {@code candidatesTokenCount}, or {@code null} if absent. */
+        public final Integer candidatesTokenCount;
+        /** Last observed {@code thoughtsTokenCount}, or {@code null} if absent. */
+        public final Integer thoughtsTokenCount;
+        /** Last observed {@code totalTokenCount}, or {@code null} if absent. */
+        public final Integer totalTokenCount;
+        /** Milliseconds from request start to first text chunk. */
+        public final long firstChunkMs;
+        /** Total milliseconds from request start to stream end. */
+        public final long elapsedMs;
+
+        StreamSummary(final int chunkCount, final int objectCount, final String finishReason, final Integer promptTokenCount,
+                final Integer candidatesTokenCount, final Integer thoughtsTokenCount, final Integer totalTokenCount,
+                final long firstChunkMs, final long elapsedMs) {
+            this.chunkCount = chunkCount;
+            this.objectCount = objectCount;
+            this.finishReason = finishReason;
+            this.promptTokenCount = promptTokenCount;
+            this.candidatesTokenCount = candidatesTokenCount;
+            this.thoughtsTokenCount = thoughtsTokenCount;
+            this.totalTokenCount = totalTokenCount;
+            this.firstChunkMs = firstChunkMs;
+            this.elapsedMs = elapsedMs;
+        }
+    }
+
+    private java.util.function.Consumer<StreamSummary> streamSummaryConsumer;
+
+    /**
+     * Test hook: receives the per-call {@link StreamSummary} right after the completion log line.
+     *
+     * @param consumer summary consumer; pass {@code null} to clear.
+     */
+    void setStreamSummaryConsumer(final java.util.function.Consumer<StreamSummary> consumer) {
+        this.streamSummaryConsumer = consumer;
+    }
+
+    /**
      * Default constructor.
      */
     public GeminiLlmClient() {
@@ -257,7 +306,13 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 }
 
                 int chunkCount = 0;
+                int objectCount = 0;
                 long firstChunkTime = 0;
+                String lastFinishReason = null;
+                Integer promptTokenCount = null;
+                Integer candidatesTokenCount = null;
+                Integer thoughtsTokenCount = null;
+                Integer totalTokenCount = null;
                 try (BufferedReader reader =
                         new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
                     final StringBuilder jsonBuffer = new StringBuilder();
@@ -320,13 +375,33 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
                                         try {
                                             final JsonNode jsonNode = objectMapper.readTree(jsonStr);
+                                            objectCount++;
+                                            if (logger.isDebugEnabled()) {
+                                                logger.debug("[LLM:GEMINI] streamObject#{} json={}", objectCount, jsonStr);
+                                            }
+                                            if (jsonNode.has("usageMetadata")) {
+                                                final JsonNode usage = jsonNode.get("usageMetadata");
+                                                if (usage.has("promptTokenCount")) {
+                                                    promptTokenCount = usage.get("promptTokenCount").asInt();
+                                                }
+                                                if (usage.has("candidatesTokenCount")) {
+                                                    candidatesTokenCount = usage.get("candidatesTokenCount").asInt();
+                                                }
+                                                if (usage.has("thoughtsTokenCount")) {
+                                                    thoughtsTokenCount = usage.get("thoughtsTokenCount").asInt();
+                                                }
+                                                if (usage.has("totalTokenCount")) {
+                                                    totalTokenCount = usage.get("totalTokenCount").asInt();
+                                                }
+                                            }
 
                                             boolean done = false;
                                             if (jsonNode.has("candidates") && jsonNode.get("candidates").isArray()
                                                     && jsonNode.get("candidates").size() > 0) {
                                                 final JsonNode firstCandidate = jsonNode.get("candidates").get(0);
-                                                if (firstCandidate.has("finishReason") && !firstCandidate.get("finishReason").isNull()
-                                                        && !"null".equals(firstCandidate.get("finishReason").asText())) {
+                                                final String reason = extractFinishReason(firstCandidate);
+                                                if (reason != null) {
+                                                    lastFinishReason = reason;
                                                     done = true;
                                                 }
 
@@ -371,8 +446,20 @@ public class GeminiLlmClient extends AbstractLlmClient {
                     }
                 }
 
-                logger.info("[LLM:GEMINI] Stream completed. chunkCount={}, firstChunkMs={}, elapsedTime={}ms", chunkCount, firstChunkTime,
-                        System.currentTimeMillis() - startTime);
+                final long elapsed = System.currentTimeMillis() - startTime;
+                logger.info(
+                        "[LLM:GEMINI] Stream completed. chunkCount={}, objectCount={}, firstChunkMs={}, elapsedTime={}ms, finishReason={}, promptTokens={}, candidatesTokens={}, thoughtsTokens={}, totalTokens={}",
+                        chunkCount, objectCount, firstChunkTime, elapsed, lastFinishReason, promptTokenCount, candidatesTokenCount,
+                        thoughtsTokenCount, totalTokenCount);
+                if (isAbnormalFinishReason(lastFinishReason)) {
+                    logger.warn(
+                            "[LLM:GEMINI] Stream finished abnormally. finishReason={}, chunkCount={}, candidatesTokens={}, thoughtsTokens={}, model={}",
+                            lastFinishReason, chunkCount, candidatesTokenCount, thoughtsTokenCount, model);
+                }
+                if (streamSummaryConsumer != null) {
+                    streamSummaryConsumer.accept(new StreamSummary(chunkCount, objectCount, lastFinishReason, promptTokenCount,
+                            candidatesTokenCount, thoughtsTokenCount, totalTokenCount, firstChunkTime, elapsed));
+                }
             }
         } catch (final LlmException e) {
             callback.onError(e);
@@ -605,10 +692,10 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.5);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(4096);
+                request.setMaxTokens(8192);
             }
             if (request.getThinkingBudget() == null) {
-                request.setThinkingBudget(2048);
+                request.setThinkingBudget(0);
             }
             break;
         case "summary":
@@ -709,6 +796,42 @@ public class GeminiLlmClient extends AbstractLlmClient {
     @Override
     public int getHistoryAssistantSummaryMaxChars() {
         return getConfigInt("history.assistant.summary.max.chars", 1000);
+    }
+
+    /**
+     * Extracts the {@code finishReason} string from a candidate JSON node.
+     *
+     * @param candidate the candidate JSON node (may be {@code null}).
+     * @return the {@code finishReason} text, or {@code null} when absent, JSON-null, blank, or the literal "null".
+     */
+    static String extractFinishReason(final JsonNode candidate) {
+        if (candidate == null || !candidate.has("finishReason")) {
+            return null;
+        }
+        final JsonNode node = candidate.get("finishReason");
+        if (node.isNull()) {
+            return null;
+        }
+        final String text = node.asText();
+        if (StringUtil.isBlank(text) || "null".equals(text)) {
+            return null;
+        }
+        return text;
+    }
+
+    /**
+     * Returns whether the given {@code finishReason} indicates an abnormal stream/chat completion.
+     *
+     * @param reason the {@code finishReason} text (may be {@code null}).
+     * @return {@code false} for {@code null}, {@code "STOP"}, and {@code "FINISH_REASON_UNSPECIFIED"}; {@code true} otherwise
+     *         (e.g. {@code MAX_TOKENS}, {@code SAFETY}, {@code RECITATION}, {@code BLOCKLIST}, {@code PROHIBITED_CONTENT},
+     *         {@code SPII}, {@code MALFORMED_FUNCTION_CALL}, {@code IMAGE_SAFETY}, {@code OTHER}).
+     */
+    static boolean isAbnormalFinishReason(final String reason) {
+        if (reason == null || "STOP".equals(reason) || "FINISH_REASON_UNSPECIFIED".equals(reason)) {
+            return false;
+        }
+        return true;
     }
 
 }
