@@ -974,7 +974,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
                 """
                         [
                         {"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]},
-                        {"candidates":[{"content":{"parts":[{"text":" world"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":2,"totalTokenCount":14,"thoughtsTokenCount":0}}
+                        {"responseId":"resp-abc","candidates":[{"content":{"parts":[{"text":" world"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"cachedContentTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":14,"thoughtsTokenCount":0}}
                         ]
                         """;
 
@@ -1003,10 +1003,12 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         final StreamSummary s = summaryRef.get();
         assertNotNull(s);
         assertEquals("STOP", s.finishReason);
+        assertEquals("resp-abc", s.responseId);
         assertEquals(2, s.objectCount);
         assertEquals(2, s.chunkCount);
         assertEquals(Integer.valueOf(2), s.candidatesTokenCount);
         assertEquals(Integer.valueOf(0), s.thoughtsTokenCount);
+        assertEquals(Integer.valueOf(3), s.cachedContentTokenCount);
     }
 
     @Test

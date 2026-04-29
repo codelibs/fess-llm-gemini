@@ -73,8 +73,12 @@ public class GeminiLlmClient extends AbstractLlmClient {
         public final int objectCount;
         /** Last observed {@code finishReason} value, or {@code null} if none was reported. */
         public final String finishReason;
+        /** Last observed top-level {@code responseId} value, or {@code null} if none was reported. */
+        public final String responseId;
         /** Last observed {@code promptTokenCount}, or {@code null} if absent. */
         public final Integer promptTokenCount;
+        /** Last observed {@code cachedContentTokenCount}, or {@code null} if absent. */
+        public final Integer cachedContentTokenCount;
         /** Last observed {@code candidatesTokenCount}, or {@code null} if absent. */
         public final Integer candidatesTokenCount;
         /** Last observed {@code thoughtsTokenCount}, or {@code null} if absent. */
@@ -86,13 +90,15 @@ public class GeminiLlmClient extends AbstractLlmClient {
         /** Total milliseconds from request start to stream end. */
         public final long elapsedMs;
 
-        StreamSummary(final int chunkCount, final int objectCount, final String finishReason, final Integer promptTokenCount,
-                final Integer candidatesTokenCount, final Integer thoughtsTokenCount, final Integer totalTokenCount,
-                final long firstChunkMs, final long elapsedMs) {
+        StreamSummary(final int chunkCount, final int objectCount, final String finishReason, final String responseId,
+                final Integer promptTokenCount, final Integer cachedContentTokenCount, final Integer candidatesTokenCount,
+                final Integer thoughtsTokenCount, final Integer totalTokenCount, final long firstChunkMs, final long elapsedMs) {
             this.chunkCount = chunkCount;
             this.objectCount = objectCount;
             this.finishReason = finishReason;
+            this.responseId = responseId;
             this.promptTokenCount = promptTokenCount;
+            this.cachedContentTokenCount = cachedContentTokenCount;
             this.candidatesTokenCount = candidatesTokenCount;
             this.thoughtsTokenCount = thoughtsTokenCount;
             this.totalTokenCount = totalTokenCount;
@@ -236,10 +242,14 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 } else {
                     chatResponse.setModel(model);
                 }
+                Integer cachedTokens = null;
                 if (jsonNode.has("usageMetadata")) {
                     final JsonNode usage = jsonNode.get("usageMetadata");
                     if (usage.has("promptTokenCount")) {
                         chatResponse.setPromptTokens(usage.get("promptTokenCount").asInt());
+                    }
+                    if (usage.has("cachedContentTokenCount")) {
+                        cachedTokens = usage.get("cachedContentTokenCount").asInt();
                     }
                     if (usage.has("candidatesTokenCount")) {
                         chatResponse.setCompletionTokens(usage.get("candidatesTokenCount").asInt());
@@ -248,12 +258,16 @@ public class GeminiLlmClient extends AbstractLlmClient {
                         chatResponse.setTotalTokens(usage.get("totalTokenCount").asInt());
                     }
                 }
+                String responseId = null;
+                if (jsonNode.has("responseId") && !jsonNode.get("responseId").isNull()) {
+                    responseId = jsonNode.get("responseId").asText();
+                }
 
                 logger.info(
-                        "[LLM:GEMINI] Chat response received. model={}, promptTokens={}, completionTokens={}, totalTokens={}, contentLength={}, elapsedTime={}ms",
-                        chatResponse.getModel(), chatResponse.getPromptTokens(), chatResponse.getCompletionTokens(),
-                        chatResponse.getTotalTokens(), chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
-                        System.currentTimeMillis() - startTime);
+                        "[LLM:GEMINI] Chat response received. model={}, responseId={}, promptTokens={}, cachedContentTokens={}, completionTokens={}, totalTokens={}, contentLength={}, elapsedTime={}ms",
+                        chatResponse.getModel(), responseId, chatResponse.getPromptTokens(), cachedTokens,
+                        chatResponse.getCompletionTokens(), chatResponse.getTotalTokens(),
+                        chatResponse.getContent() != null ? chatResponse.getContent().length() : 0, System.currentTimeMillis() - startTime);
                 if (isAbnormalFinishReason(chatResponse.getFinishReason())) {
                     logger.warn("[LLM:GEMINI] Chat finished abnormally. finishReason={}, contentLength={}, model={}",
                             chatResponse.getFinishReason(), chatResponse.getContent() != null ? chatResponse.getContent().length() : 0,
@@ -322,7 +336,9 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 int objectCount = 0;
                 long firstChunkTime = 0;
                 String lastFinishReason = null;
+                String lastResponseId = null;
                 Integer promptTokenCount = null;
+                Integer cachedContentTokenCount = null;
                 Integer candidatesTokenCount = null;
                 Integer thoughtsTokenCount = null;
                 Integer totalTokenCount = null;
@@ -402,10 +418,16 @@ public class GeminiLlmClient extends AbstractLlmClient {
                                             if (logger.isDebugEnabled()) {
                                                 logger.debug("[LLM:GEMINI] streamObject#{} json={}", objectCount, jsonStr);
                                             }
+                                            if (jsonNode.has("responseId") && !jsonNode.get("responseId").isNull()) {
+                                                lastResponseId = jsonNode.get("responseId").asText();
+                                            }
                                             if (jsonNode.has("usageMetadata")) {
                                                 final JsonNode usage = jsonNode.get("usageMetadata");
                                                 if (usage.has("promptTokenCount")) {
                                                     promptTokenCount = usage.get("promptTokenCount").asInt();
+                                                }
+                                                if (usage.has("cachedContentTokenCount")) {
+                                                    cachedContentTokenCount = usage.get("cachedContentTokenCount").asInt();
                                                 }
                                                 if (usage.has("candidatesTokenCount")) {
                                                     candidatesTokenCount = usage.get("candidatesTokenCount").asInt();
@@ -471,17 +493,18 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
                 final long elapsed = System.currentTimeMillis() - startTime;
                 logger.info(
-                        "[LLM:GEMINI] Stream completed. chunkCount={}, objectCount={}, firstChunkMs={}, elapsedTime={}ms, finishReason={}, promptTokens={}, candidatesTokens={}, thoughtsTokens={}, totalTokens={}",
-                        chunkCount, objectCount, firstChunkTime, elapsed, lastFinishReason, promptTokenCount, candidatesTokenCount,
-                        thoughtsTokenCount, totalTokenCount);
+                        "[LLM:GEMINI] Stream completed. chunkCount={}, objectCount={}, firstChunkMs={}, elapsedTime={}ms, responseId={}, finishReason={}, promptTokens={}, cachedContentTokens={}, candidatesTokens={}, thoughtsTokens={}, totalTokens={}",
+                        chunkCount, objectCount, firstChunkTime, elapsed, lastResponseId, lastFinishReason, promptTokenCount,
+                        cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount, totalTokenCount);
                 if (isAbnormalFinishReason(lastFinishReason)) {
                     logger.warn(
-                            "[LLM:GEMINI] Stream finished abnormally. finishReason={}, chunkCount={}, candidatesTokens={}, thoughtsTokens={}, model={}",
-                            lastFinishReason, chunkCount, candidatesTokenCount, thoughtsTokenCount, model);
+                            "[LLM:GEMINI] Stream finished abnormally. responseId={}, finishReason={}, chunkCount={}, candidatesTokens={}, thoughtsTokens={}, model={}",
+                            lastResponseId, lastFinishReason, chunkCount, candidatesTokenCount, thoughtsTokenCount, model);
                 }
                 if (streamSummaryConsumer != null) {
-                    streamSummaryConsumer.accept(new StreamSummary(chunkCount, objectCount, lastFinishReason, promptTokenCount,
-                            candidatesTokenCount, thoughtsTokenCount, totalTokenCount, firstChunkTime, elapsed));
+                    streamSummaryConsumer.accept(new StreamSummary(chunkCount, objectCount, lastFinishReason, lastResponseId,
+                            promptTokenCount, cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount, totalTokenCount,
+                            firstChunkTime, elapsed));
                 }
             }
         } catch (final LlmException e) {
