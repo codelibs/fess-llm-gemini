@@ -330,6 +330,16 @@ public class GeminiLlmClient extends AbstractLlmClient {
                         if (StringUtil.isBlank(line)) {
                             continue;
                         }
+                        // SSE comment line, e.g. ": keepalive"
+                        if (line.charAt(0) == ':') {
+                            continue;
+                        }
+                        // SSE terminator sometimes used by proxies / older deployments
+                        final String trimmed = line.trim();
+                        if ("data: [DONE]".equals(trimmed) || "[DONE]".equals(trimmed)) {
+                            streamDone = true;
+                            continue;
+                        }
 
                         for (int ci = 0; ci < line.length() && !streamDone; ci++) {
                             final char c = line.charAt(ci);

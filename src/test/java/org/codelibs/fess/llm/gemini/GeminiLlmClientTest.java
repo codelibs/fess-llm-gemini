@@ -1007,6 +1007,92 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_streamChat_sseFormatTwoEvents() throws IOException {
+        final String streamResponse = "" + "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hel\"}],\"role\":\"model\"}}]}\n"
+                + "\n"
+                + "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"lo\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":2,\"totalTokenCount\":5}}\n"
+                + "\n";
+
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "text/event-stream"));
+        setupClientForMockServer();
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hi");
+        final List<String> chunks = new ArrayList<>();
+        final AtomicBoolean doneReceived = new AtomicBoolean(false);
+        client.streamChat(request, new LlmStreamCallback() {
+            @Override
+            public void onChunk(final String content, final boolean done) {
+                chunks.add(content);
+                if (done) {
+                    doneReceived.set(true);
+                }
+            }
+
+            @Override
+            public void onError(final Throwable error) {
+                fail("Unexpected: " + error.getMessage());
+            }
+        });
+
+        assertEquals(2, chunks.size());
+        assertEquals("Hel", chunks.get(0));
+        assertEquals("lo", chunks.get(1));
+        assertTrue(doneReceived.get());
+    }
+
+    @Test
+    public void test_streamChat_sseTerminatorDoneIsIgnored() throws IOException {
+        final String streamResponse =
+                "" + "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"x\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n"
+                        + "\n" + "data: [DONE]\n" + "\n";
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "text/event-stream"));
+        setupClientForMockServer();
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hi");
+        final List<String> chunks = new ArrayList<>();
+        client.streamChat(request, new LlmStreamCallback() {
+            @Override
+            public void onChunk(final String content, final boolean done) {
+                chunks.add(content);
+            }
+
+            @Override
+            public void onError(final Throwable error) {
+                fail("Unexpected: " + error.getMessage());
+            }
+        });
+
+        assertEquals(1, chunks.size());
+        assertEquals("x", chunks.get(0));
+    }
+
+    @Test
+    public void test_streamChat_sseCommentLinesIgnored() throws IOException {
+        // Some proxies send heartbeats as ":keepalive" SSE comments
+        final String streamResponse = "" + ": ping\n"
+                + "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"y\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n"
+                + "\n";
+        mockServer.enqueue(new MockResponse().setBody(streamResponse).addHeader("Content-Type", "text/event-stream"));
+        setupClientForMockServer();
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hi");
+        final List<String> chunks = new ArrayList<>();
+        client.streamChat(request, new LlmStreamCallback() {
+            @Override
+            public void onChunk(final String content, final boolean done) {
+                chunks.add(content);
+            }
+
+            @Override
+            public void onError(final Throwable error) {
+                fail("Unexpected: " + error.getMessage());
+            }
+        });
+        assertEquals(1, chunks.size());
+        assertEquals("y", chunks.get(0));
+    }
+
+    @Test
     public void test_streamChat_malformedJson() throws IOException {
         final String streamResponse = """
                 [
