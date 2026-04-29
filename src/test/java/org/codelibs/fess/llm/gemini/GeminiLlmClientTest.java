@@ -1769,6 +1769,12 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         assertFalse(GeminiLlmClient.isGemini3(null));
     }
 
+    @Test
+    public void test_isGemini3_doesNotMatchGemini30() {
+        // Hypothetical "gemini-30-..." id MUST NOT be classified as Gemini 3 generation.
+        assertFalse(GeminiLlmClient.isGemini3("gemini-30-flash"));
+    }
+
     // ========== Stream completion log diagnostics tests ==========
     // These tests verify that streamChat emits finishReason and usageMetadata
     // in its "Stream completed" INFO log so that 1-character / truncated-response
@@ -2032,11 +2038,21 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         setupClientForMockServer();
 
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hi");
-        final LlmChatResponse response = client.chat(request);
+        final List<String> messages = new ArrayList<>();
+        final AtomicReference<LlmChatResponse> responseRef = new AtomicReference<>();
+        runStreamWithCapturedLogs(messages, () -> responseRef.set(client.chat(request)));
 
+        final LlmChatResponse response = responseRef.get();
         // No content, no finishReason. We're verifying the call path doesn't crash.
         assertNull(response.getContent());
-        // The WARN actually fires; we don't capture log output here, but make sure response object is still useful.
+        // Verify the WARN actually fires with the expected blockReason.
+        int matched = 0;
+        for (final String m : messages) {
+            if (m.contains("Prompt blocked. blockReason=SAFETY")) {
+                matched++;
+            }
+        }
+        assertEquals("expected exactly one 'Prompt blocked. blockReason=SAFETY' WARN, captured=" + messages, 1, matched);
     }
 
     @Test
@@ -2052,7 +2068,8 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hi");
         final List<String> chunks = new ArrayList<>();
-        client.streamChat(request, new LlmStreamCallback() {
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> client.streamChat(request, new LlmStreamCallback() {
             @Override
             public void onChunk(final String content, final boolean done) {
                 chunks.add(content);
@@ -2062,10 +2079,19 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             public void onError(final Throwable error) {
                 fail("Unexpected error: " + error.getMessage());
             }
-        });
+        }));
         assertEquals(1, chunks.size());
         assertEquals("Partial", chunks.get(0));
-        // The WARN log carrying safetyRatings is exercised by this code path.
+        // Verify the WARN log carries the safety detail we expect.
+        int matched = 0;
+        for (final String m : messages) {
+            if (m.contains("Stream candidate safety ratings.") && m.contains("finishReason=SAFETY")
+                    && m.contains("safetyRatings=[HARM_CATEGORY_HATE_SPEECH:HIGH(blocked)]")) {
+                matched++;
+            }
+        }
+        assertEquals("expected exactly one 'Stream candidate safety ratings.' WARN with SAFETY/HATE_SPEECH; captured=" + messages, 1,
+                matched);
     }
 
     // ========== Retry with exponential backoff tests ==========

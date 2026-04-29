@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
@@ -107,6 +108,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
         }
     }
 
+    /** Test hook; not thread-safe. Set once before invoking streamChat from a single thread. */
     private java.util.function.Consumer<StreamSummary> streamSummaryConsumer;
 
     /**
@@ -300,6 +302,10 @@ public class GeminiLlmClient extends AbstractLlmClient {
             });
         } catch (final LlmException e) {
             throw e;
+        } catch (final RetryableHttpException e) {
+            // Defensive: executeWithRetry consumes RetryableHttpException, so this should never fire today.
+            // Documents intent and protects future refactors.
+            throw new LlmException("Gemini API retryable exhausted", LlmException.ERROR_CONNECTION, e);
         } catch (final Exception e) {
             logger.warn("[LLM:GEMINI] Failed to call Gemini API. url={}, error={}", maskApiKeyInUrl(url), e.getMessage(), e);
             throw new LlmException("Failed to call Gemini API", LlmException.ERROR_CONNECTION, e);
@@ -991,7 +997,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
         if (model == null) {
             return false;
         }
-        return model.startsWith("gemini-3") || model.startsWith("gemini-3.");
+        return model.startsWith("gemini-3-") || model.startsWith("gemini-3.") || "gemini-3".equals(model);
     }
 
     /**
@@ -1077,7 +1083,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                     logger.warn("[LLM:GEMINI] {} retry exhausted. attempts={}, lastStatus={}", operation, attempt, e.statusCode);
                     throw new IOException("Gemini API retryable error: " + e.statusCode + " " + e.reason, e);
                 }
-                final long jitter = (long) (baseDelay * 0.2 * (Math.random() * 2 - 1)); // ±20%
+                final long jitter = (long) (baseDelay * 0.2 * ThreadLocalRandom.current().nextDouble(-1.0, 1.0)); // ±20%
                 final long delay = (long) (baseDelay * Math.pow(2, attempt - 1)) + jitter;
                 logger.info("[LLM:GEMINI] {} retrying. attempt={}/{}, status={}, sleepMs={}", operation, attempt, maxAttempts, e.statusCode,
                         Math.max(0, delay));
