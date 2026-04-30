@@ -2260,7 +2260,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         final LlmChatRequest request = new LlmChatRequest();
         client.testApplyDefaultParams(request, "intent");
         assertEquals(Double.valueOf(0.1), request.getTemperature());
-        assertEquals(Integer.valueOf(256), request.getMaxTokens());
+        assertEquals(Integer.valueOf(512), request.getMaxTokens());
         assertEquals(Integer.valueOf(0), request.getThinkingBudget());
     }
 
@@ -2296,7 +2296,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         final LlmChatRequest request = new LlmChatRequest();
         client.testApplyDefaultParams(request, "docnotfound");
         assertEquals(Double.valueOf(0.7), request.getTemperature());
-        assertEquals(Integer.valueOf(256), request.getMaxTokens());
+        assertEquals(Integer.valueOf(512), request.getMaxTokens());
         assertEquals(Integer.valueOf(0), request.getThinkingBudget());
     }
 
@@ -2364,6 +2364,121 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         assertNull(request.getTemperature());
         assertNull(request.getMaxTokens());
         assertNull(request.getThinkingBudget());
+    }
+
+    // --- Gemini 3 thinking-headroom tests ---
+    //
+    // Gemini 3.x always emits some thinking tokens (even at thinkingLevel=LOW), so the
+    // visible-output budget alone is not enough: requests truncate with finishReason=
+    // MAX_TOKENS. The defaults add GEMINI3_THINKING_HEADROOM (1024) on top of each
+    // visible budget for Gemini 3.x models only; Gemini 2.x defaults are unchanged.
+
+    @Test
+    public void test_applyDefaultParams_gemini3_intent() {
+        client.setTestModel("gemini-3-flash-preview");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "intent");
+        assertEquals(Double.valueOf(0.1), request.getTemperature());
+        assertEquals(Integer.valueOf(512 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+        assertEquals(Integer.valueOf(0), request.getThinkingBudget());
+    }
+
+    @Test
+    public void test_applyDefaultParams_gemini3_evaluation() {
+        client.setTestModel("gemini-3-flash-preview");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "evaluation");
+        assertEquals(Integer.valueOf(256 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_applyDefaultParams_gemini3_unclear() {
+        client.setTestModel("gemini-3-flash-preview");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "unclear");
+        assertEquals(Integer.valueOf(512 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_applyDefaultParams_gemini3_noresults() {
+        client.setTestModel("gemini-3-pro");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "noresults");
+        assertEquals(Integer.valueOf(512 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_applyDefaultParams_gemini3_docnotfound() {
+        client.setTestModel("gemini-3.1-pro");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "docnotfound");
+        assertEquals(Integer.valueOf(512 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_applyDefaultParams_gemini3_direct() {
+        client.setTestModel("gemini-3-flash-preview");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "direct");
+        assertEquals(Integer.valueOf(2048 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_applyDefaultParams_gemini3_faq() {
+        client.setTestModel("gemini-3-flash-preview");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "faq");
+        assertEquals(Integer.valueOf(2048 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_applyDefaultParams_gemini3_answer() {
+        client.setTestModel("gemini-3-flash-preview");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "answer");
+        assertEquals(Integer.valueOf(8192 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_applyDefaultParams_gemini3_summary() {
+        client.setTestModel("gemini-3-flash-preview");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "summary");
+        assertEquals(Integer.valueOf(4096 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_applyDefaultParams_gemini3_queryregeneration() {
+        client.setTestModel("gemini-3-flash-preview");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "queryregeneration");
+        assertEquals(Integer.valueOf(256 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_applyDefaultParams_gemini3_userMaxTokensPreserved() {
+        client.setTestModel("gemini-3-flash-preview");
+        final LlmChatRequest request = new LlmChatRequest();
+        request.setMaxTokens(1234);
+        client.testApplyDefaultParams(request, "intent");
+        assertEquals(Integer.valueOf(1234), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_applyDefaultParams_requestModelOverridesConfig() {
+        client.setTestModel("gemini-2.5-flash");
+        final LlmChatRequest request = new LlmChatRequest();
+        request.setModel("gemini-3-flash-preview");
+        client.testApplyDefaultParams(request, "intent");
+        assertEquals(Integer.valueOf(512 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_defaultMaxTokens_helper() {
+        assertEquals(256, GeminiLlmClient.defaultMaxTokens(256, false));
+        assertEquals(256 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM, GeminiLlmClient.defaultMaxTokens(256, true));
+        assertEquals(8192, GeminiLlmClient.defaultMaxTokens(8192, false));
+        assertEquals(8192 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM, GeminiLlmClient.defaultMaxTokens(8192, true));
     }
 
     // --- Budget method tests ---

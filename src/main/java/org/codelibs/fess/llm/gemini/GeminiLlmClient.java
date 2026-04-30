@@ -724,7 +724,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     @Override
     protected String getModel() {
-        return ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.model", "gemini-3-flash-preview");
+        return ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.model", "gemini-3.1-flash-lite-preview");
     }
 
     @Override
@@ -744,21 +744,65 @@ public class GeminiLlmClient extends AbstractLlmClient {
     }
 
     /**
+     * Extra {@code maxOutputTokens} headroom added to Gemini 3 default budgets so the
+     * mandatory thinking tokens (the {@code thinkingLevel=LOW} bucket still consumes a
+     * few hundred tokens per response) do not crowd out the visible reply.
+     *
+     * <p>Gemini 2.x honours {@code thinkingBudget=0} as "thinking off" so the visible
+     * budget alone is enough; Gemini 3.x always emits some thinking tokens even at the
+     * lowest level, so the cap must cover both.
+     */
+    static final int GEMINI3_THINKING_HEADROOM = 1024;
+
+    /**
+     * Resolves the default {@code maxOutputTokens} for a prompt type, adding
+     * {@link #GEMINI3_THINKING_HEADROOM} when the resolved model is a Gemini 3.x model
+     * so the mandatory thinking spend does not eat into the visible-output budget.
+     *
+     * @param visibleTokens the budget required for the actual visible response.
+     * @param gemini3 {@code true} when the active model is Gemini 3.x.
+     * @return the resolved default {@code maxOutputTokens}.
+     */
+    static int defaultMaxTokens(final int visibleTokens, final boolean gemini3) {
+        return gemini3 ? visibleTokens + GEMINI3_THINKING_HEADROOM : visibleTokens;
+    }
+
+    /**
      * Applies default generation parameters for the Gemini API free tier.
      * Only sets defaults when user has not configured the parameter.
+     *
+     * <p>The {@code maxOutputTokens} default is model-aware: for Gemini 3.x models the
+     * mandatory thinking token spend (even at {@code thinkingLevel=LOW}) is added on top
+     * of each prompt type's visible-output budget so responses do not get truncated with
+     * {@code finishReason=MAX_TOKENS}. Gemini 2.x defaults are unchanged.
      *
      * @param request the LLM chat request
      * @param promptType the prompt type (e.g. "intent", "evaluation", "answer")
      */
     protected void applyDefaultParams(final LlmChatRequest request, final String promptType) {
+        final boolean gemini3 = isGemini3(getModelName(request));
         switch (promptType) {
         case "intent":
+            if (request.getTemperature() == null) {
+                request.setTemperature(0.1);
+            }
+            if (request.getMaxTokens() == null) {
+                // Intent JSON includes a query string with Fess query syntax plus a
+                // reasoning field; in non-English locales (e.g. Japanese) reasoning
+                // tokens can easily push the visible output above 256.
+                request.setMaxTokens(defaultMaxTokens(512, gemini3));
+            }
+            if (request.getThinkingBudget() == null) {
+                request.setThinkingBudget(0);
+            }
+            break;
         case "evaluation":
             if (request.getTemperature() == null) {
                 request.setTemperature(0.1);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(256);
+                // Tiny JSON: {"relevant_indexes":[..],"has_relevant":bool}
+                request.setMaxTokens(defaultMaxTokens(256, gemini3));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -770,7 +814,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.7);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(512);
+                request.setMaxTokens(defaultMaxTokens(512, gemini3));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -781,7 +825,10 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.7);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(256);
+                // Polite multi-bullet message that re-prints the requested URL; sized
+                // to match unclear/noresults so non-English (e.g. Japanese) responses
+                // do not truncate.
+                request.setMaxTokens(defaultMaxTokens(512, gemini3));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -793,7 +840,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.7);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(2048);
+                request.setMaxTokens(defaultMaxTokens(2048, gemini3));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -804,7 +851,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.5);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(8192);
+                request.setMaxTokens(defaultMaxTokens(8192, gemini3));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -815,7 +862,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.3);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(4096);
+                request.setMaxTokens(defaultMaxTokens(4096, gemini3));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -826,7 +873,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.3);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(256);
+                request.setMaxTokens(defaultMaxTokens(256, gemini3));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
