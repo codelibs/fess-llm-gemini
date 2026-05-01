@@ -1067,12 +1067,12 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     /**
      * Returns the maximum number of attempts (initial + retries) for a single HTTP call.
-     * Configured via {@code rag.llm.gemini.retry.max} (default {@code 3}).
+     * Configured via {@code rag.llm.gemini.retry.max} (default {@code 10}).
      *
      * @return the maximum number of attempts.
      */
     protected int getRetryMaxAttempts() {
-        return getConfigInt("retry.max", 3);
+        return getConfigInt("retry.max", 10);
     }
 
     /**
