@@ -2190,6 +2190,125 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         client.init();
     }
 
+    // --- Proxy tests ---
+
+    @Test
+    public void test_chat_throughProxy_withoutAuth() throws Exception {
+        // Use a separate MockWebServer as the proxy. With a configured HTTP proxy,
+        // HttpClient sends the request to the proxy with an absolute-form request URI.
+        final MockWebServer proxyServer = new MockWebServer();
+        try {
+            proxyServer.start();
+            final String responseJson = """
+                    {
+                        "candidates": [{
+                            "content": {"parts": [{"text": "ok"}]},
+                            "finishReason": "STOP"
+                        }],
+                        "modelVersion": "gemini-2.0-flash"
+                    }
+                    """;
+            proxyServer.enqueue(new MockResponse().setBody(responseJson).addHeader("Content-Type", "application/json"));
+
+            // Point the client at a non-localhost target so we can verify the request was routed via the proxy.
+            client.setTestApiUrl("http://gemini.invalid/v1beta");
+            client.setTestApiKey("test-key");
+            client.setTestModel("gemini-2.0-flash");
+            client.setTestTimeout(30000);
+            client.setTestProxyHost(proxyServer.getHostName());
+            client.setTestProxyPort(proxyServer.getPort());
+            client.init();
+
+            final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hello");
+            final LlmChatResponse response = client.chat(request);
+            assertEquals("ok", response.getContent());
+
+            final RecordedRequest recorded = proxyServer.takeRequest();
+            // Proxy receives an absolute-form request URI starting with the target URL.
+            assertTrue("Expected absolute-form URI starting with http://gemini.invalid/, got: " + recorded.getRequestLine(),
+                    recorded.getRequestLine().contains("http://gemini.invalid/"));
+            assertNull(recorded.getHeader("Proxy-Authorization"), "No proxy auth expected");
+        } finally {
+            proxyServer.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_throughProxy_withBasicAuth() throws Exception {
+        final MockWebServer proxyServer = new MockWebServer();
+        try {
+            proxyServer.start();
+            // First response: 407 challenges the client to authenticate.
+            proxyServer
+                    .enqueue(new MockResponse().setResponseCode(407).addHeader("Proxy-Authenticate", "Basic realm=\"proxy\"").setBody(""));
+            // Second response: success after the client retries with credentials.
+            final String responseJson = """
+                    {
+                        "candidates": [{
+                            "content": {"parts": [{"text": "ok"}]},
+                            "finishReason": "STOP"
+                        }],
+                        "modelVersion": "gemini-2.0-flash"
+                    }
+                    """;
+            proxyServer.enqueue(new MockResponse().setBody(responseJson).addHeader("Content-Type", "application/json"));
+
+            client.setTestApiUrl("http://gemini.invalid/v1beta");
+            client.setTestApiKey("test-key");
+            client.setTestModel("gemini-2.0-flash");
+            client.setTestTimeout(30000);
+            client.setTestProxyHost(proxyServer.getHostName());
+            client.setTestProxyPort(proxyServer.getPort());
+            client.setTestProxyUsername("proxyuser");
+            client.setTestProxyPassword("proxypass");
+            client.init();
+
+            final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hello");
+            final LlmChatResponse response = client.chat(request);
+            assertEquals("ok", response.getContent());
+
+            // First request: no credentials.
+            final RecordedRequest first = proxyServer.takeRequest();
+            assertNull(first.getHeader("Proxy-Authorization"));
+            // Second request: includes Basic credentials.
+            final RecordedRequest second = proxyServer.takeRequest();
+            final String auth = second.getHeader("Proxy-Authorization");
+            assertNotNull(auth, "Proxy-Authorization header expected on retry");
+            assertTrue("Expected Basic auth header, got: " + auth, auth.startsWith("Basic "));
+            final String expected = "Basic "
+                    + java.util.Base64.getEncoder().encodeToString("proxyuser:proxypass".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertEquals(expected, auth);
+        } finally {
+            proxyServer.shutdown();
+        }
+    }
+
+    @Test
+    public void test_chat_noProxy_directConnection() throws Exception {
+        // When proxy host is blank, requests go directly to the target server.
+        final String responseJson = """
+                {
+                    "candidates": [{
+                        "content": {"parts": [{"text": "direct"}]},
+                        "finishReason": "STOP"
+                    }],
+                    "modelVersion": "gemini-2.0-flash"
+                }
+                """;
+        mockServer.enqueue(new MockResponse().setBody(responseJson).addHeader("Content-Type", "application/json"));
+        // Explicitly leave proxy unset; setupClientForMockServer omits proxy config.
+        setupClientForMockServer();
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("Hello");
+        final LlmChatResponse response = client.chat(request);
+        assertEquals("direct", response.getContent());
+
+        final RecordedRequest recorded = mockServer.takeRequest();
+        // Direct connection uses origin-form (path only), not absolute-form.
+        assertTrue("Expected origin-form request line, got: " + recorded.getRequestLine(),
+                recorded.getRequestLine().startsWith("POST /models/"));
+    }
+
     /**
      * Attaches a capturing appender to the GeminiLlmClient logger, runs the action,
      * then detaches the appender — leaving the logger configuration untouched for
@@ -2511,6 +2630,10 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         private int testMaxTokens = 4096;
         private long testRetryBaseDelayMs = 2000L;
         private int testRetryMaxAttempts = 3;
+        private String testProxyHost = "";
+        private Integer testProxyPort = null;
+        private String testProxyUsername = "";
+        private String testProxyPassword = "";
 
         public void setTestRetryBaseDelayMs(final long ms) {
             this.testRetryBaseDelayMs = ms;
@@ -2552,6 +2675,42 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
         void setTestMaxTokens(final int maxTokens) {
             this.testMaxTokens = maxTokens;
+        }
+
+        void setTestProxyHost(final String proxyHost) {
+            this.testProxyHost = proxyHost;
+        }
+
+        void setTestProxyPort(final Integer proxyPort) {
+            this.testProxyPort = proxyPort;
+        }
+
+        void setTestProxyUsername(final String proxyUsername) {
+            this.testProxyUsername = proxyUsername;
+        }
+
+        void setTestProxyPassword(final String proxyPassword) {
+            this.testProxyPassword = proxyPassword;
+        }
+
+        @Override
+        protected String getProxyHost() {
+            return testProxyHost;
+        }
+
+        @Override
+        protected Integer getProxyPort() {
+            return testProxyPort;
+        }
+
+        @Override
+        protected String getProxyUsername() {
+            return testProxyUsername;
+        }
+
+        @Override
+        protected String getProxyPassword() {
+            return testProxyPassword;
         }
 
         @Override
