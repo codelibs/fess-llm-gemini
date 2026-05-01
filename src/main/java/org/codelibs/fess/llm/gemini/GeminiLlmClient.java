@@ -654,7 +654,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
             final Map<String, Object> thinkingConfig = new HashMap<>();
             final String model = getModelName(request);
             if (isGemini3(model)) {
-                thinkingConfig.put("thinkingLevel", budgetToThinkingLevel(request.getThinkingBudget()));
+                thinkingConfig.put("thinkingLevel", budgetToThinkingLevel(request.getThinkingBudget(), model));
             } else {
                 thinkingConfig.put("thinkingBudget", request.getThinkingBudget());
             }
@@ -745,8 +745,8 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     /**
      * Extra {@code maxOutputTokens} headroom added to Gemini 3 default budgets so the
-     * mandatory thinking tokens (the {@code thinkingLevel=LOW} bucket still consumes a
-     * few hundred tokens per response) do not crowd out the visible reply.
+     * mandatory thinking tokens (even the lowest {@code thinkingLevel} bucket still consumes
+     * a few hundred tokens per response) do not crowd out the visible reply.
      *
      * <p>Gemini 2.x honours {@code thinkingBudget=0} as "thinking off" so the visible
      * budget alone is enough; Gemini 3.x always emits some thinking tokens even at the
@@ -772,9 +772,9 @@ public class GeminiLlmClient extends AbstractLlmClient {
      * Only sets defaults when user has not configured the parameter.
      *
      * <p>The {@code maxOutputTokens} default is model-aware: for Gemini 3.x models the
-     * mandatory thinking token spend (even at {@code thinkingLevel=LOW}) is added on top
-     * of each prompt type's visible-output budget so responses do not get truncated with
-     * {@code finishReason=MAX_TOKENS}. Gemini 2.x defaults are unchanged.
+     * mandatory thinking token spend (even at the lowest {@code thinkingLevel} bucket) is
+     * added on top of each prompt type's visible-output budget so responses do not get
+     * truncated with {@code finishReason=MAX_TOKENS}. Gemini 2.x defaults are unchanged.
      *
      * @param request the LLM chat request
      * @param promptType the prompt type (e.g. "intent", "evaluation", "answer")
@@ -1034,8 +1034,9 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     /**
      * Detects whether a model id refers to the Gemini 3 generation, which uses
-     * {@code thinkingLevel} (LOW/MEDIUM/HIGH) instead of the integer
-     * {@code thinkingBudget} accepted by Gemini 2.x.
+     * {@code thinkingLevel} (MINIMAL/LOW/MEDIUM/HIGH) instead of the integer
+     * {@code thinkingBudget} accepted by Gemini 2.x. Note that {@code MINIMAL} is only
+     * supported on a subset of Gemini 3 models — see {@link #supportsMinimalThinking}.
      *
      * @param model the model id, for example {@code "gemini-3-flash"} or {@code "gemini-3.1-pro"}.
      * @return {@code true} when the id starts with {@code "gemini-3"}; {@code false} when {@code null} or any other generation.
@@ -1048,16 +1049,34 @@ public class GeminiLlmClient extends AbstractLlmClient {
     }
 
     /**
+     * Detects whether the given Gemini 3 model supports the {@code MINIMAL} thinking level.
+     * Per the official Gemini API docs, {@code MINIMAL} is supported by Gemini 3 Flash and
+     * Gemini 3.1 Flash-Lite (any Gemini 3 id whose name contains {@code "flash"}), but is
+     * NOT supported by Gemini 3 Pro / Gemini 3.1 Pro.
+     *
+     * @param model the model id, e.g. {@code "gemini-3-flash"}, {@code "gemini-3.1-flash-lite-preview"}, {@code "gemini-3.1-pro"}.
+     * @return {@code true} when the id is a Gemini 3 model that supports {@code MINIMAL}.
+     */
+    static boolean supportsMinimalThinking(final String model) {
+        return isGemini3(model) && model.contains("flash");
+    }
+
+    /**
      * Translates a Gemini 2.x {@code thinkingBudget} (integer token allowance) into the
-     * Gemini 3.x {@code thinkingLevel} bucket. Mapping: {@code <=0 -> LOW}, {@code <=4096 -> MEDIUM},
-     * {@code >4096 -> HIGH}.
+     * Gemini 3.x {@code thinkingLevel} bucket. Mapping:
+     * {@code <=0 -> MINIMAL} (when {@code model} supports it, otherwise {@code LOW}),
+     * {@code <=4096 -> MEDIUM}, {@code >4096 -> HIGH}.
+     *
+     * <p>{@code MINIMAL} is supported on Gemini 3 Flash / Gemini 3.1 Flash-Lite but not on
+     * Gemini 3 Pro, so the {@code budget <= 0} branch is model-dependent.
      *
      * @param budget the requested thinking budget in tokens.
-     * @return one of {@code "LOW"}, {@code "MEDIUM"}, {@code "HIGH"}.
+     * @param model the resolved model id, used to decide whether {@code MINIMAL} is supported.
+     * @return one of {@code "MINIMAL"}, {@code "LOW"}, {@code "MEDIUM"}, {@code "HIGH"}.
      */
-    static String budgetToThinkingLevel(final int budget) {
+    static String budgetToThinkingLevel(final int budget, final String model) {
         if (budget <= 0) {
-            return "LOW";
+            return supportsMinimalThinking(model) ? "MINIMAL" : "LOW";
         }
         if (budget <= 4096) {
             return "MEDIUM";

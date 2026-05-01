@@ -83,14 +83,17 @@ starts flowing, partial-stream errors propagate immediately.
 
 ### Model-aware thinking
 
-`thinkingBudget` (integer, Gemini 2.x) and `thinkingLevel` (`LOW`/`MEDIUM`/
-`HIGH`, Gemini 3.x) are mutually exclusive on the wire. The client detects
-the model generation by ID prefix and translates the request-level
+`thinkingBudget` (integer, Gemini 2.x) and `thinkingLevel` (`MINIMAL`/`LOW`/
+`MEDIUM`/`HIGH`, Gemini 3.x) are mutually exclusive on the wire. The client
+detects the model generation by ID prefix and translates the request-level
 `thinkingBudget` to the appropriate field:
 
 - Gemini 2.x: `thinkingBudget` is sent as-is.
-- Gemini 3.x: `thinkingBudget` is mapped to `thinkingLevel`
-  (`<=0` → `LOW`, `<=4096` → `MEDIUM`, `>4096` → `HIGH`).
+- Gemini 3.x: `thinkingBudget` is mapped to `thinkingLevel`. The `<=0`
+  bucket is model-aware: it maps to `MINIMAL` on Gemini 3 Flash and Gemini
+  3.1 Flash-Lite (which support `MINIMAL`), and to `LOW` on Gemini 3 Pro /
+  Gemini 3.1 Pro (which do not). `<=4096` maps to `MEDIUM`, `>4096` to
+  `HIGH`.
 
 ### Default generation parameters
 
@@ -108,11 +111,12 @@ The per-step values are sized for non-English (e.g. Japanese) responses, where
 the JSON reasoning field and the polite multi-bullet "document not found"
 message can both exceed 256 visible tokens in Japanese.
 
-Because Gemini 3.x always emits some thinking tokens (even at
-`thinkingLevel=LOW`, which is the bucket `thinkingBudget=0` maps to), the
-default `maxOutputTokens` is **model-aware**: when the resolved model is a
-Gemini 3.x model, an extra `GEMINI3_THINKING_HEADROOM` (1024 tokens) is added
-on top of each prompt type's visible budget so responses do not truncate with
+Because Gemini 3.x always emits some thinking tokens (even at the lowest
+`thinkingLevel` bucket — `MINIMAL` on Flash/Flash-Lite, `LOW` on Pro — which
+is the bucket `thinkingBudget=0` maps to), the default `maxOutputTokens` is
+**model-aware**: when the resolved model is a Gemini 3.x model, an extra
+`GEMINI3_THINKING_HEADROOM` (1024 tokens) is added on top of each prompt
+type's visible budget so responses do not truncate with
 `finishReason=MAX_TOKENS`. Gemini 2.x defaults are unchanged because
 `thinkingBudget=0` actually disables thinking on the 2.x wire format.
 

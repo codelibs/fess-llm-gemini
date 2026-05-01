@@ -1719,11 +1719,33 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
     // ========== Model-aware thinking config tests ==========
 
     @Test
-    public void test_buildRequestBody_gemini3UsesThinkingLevel() throws Exception {
+    public void test_buildRequestBody_gemini3FlashUsesMinimalForZeroBudget() throws Exception {
         setupClientForMockServer();
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(1024).setThinkingBudget(0);
-        // Force the model to a Gemini 3 id via test hook
+        // Gemini 3 Flash supports MINIMAL — thinkingBudget=0 should map to it for lowest cost/latency.
         final String json = client.testBuildRequestBodyForModel(request, "gemini-3-flash");
+        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
+        assertFalse("thinkingBudget MUST NOT be sent to Gemini 3", thinking.has("thinkingBudget"));
+        assertEquals("MINIMAL", thinking.path("thinkingLevel").asText());
+    }
+
+    @Test
+    public void test_buildRequestBody_gemini3FlashLiteUsesMinimalForZeroBudget() throws Exception {
+        setupClientForMockServer();
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(1024).setThinkingBudget(0);
+        // The default model gemini-3.1-flash-lite-preview also supports MINIMAL.
+        final String json = client.testBuildRequestBodyForModel(request, "gemini-3.1-flash-lite-preview");
+        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        assertEquals("MINIMAL", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
+    }
+
+    @Test
+    public void test_buildRequestBody_gemini3ProUsesLowForZeroBudget() throws Exception {
+        setupClientForMockServer();
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(1024).setThinkingBudget(0);
+        // Gemini 3 Pro / 3.1 Pro do NOT support MINIMAL — thinkingBudget=0 falls back to LOW.
+        final String json = client.testBuildRequestBodyForModel(request, "gemini-3.1-pro");
         final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
         final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
         assertFalse("thinkingBudget MUST NOT be sent to Gemini 3", thinking.has("thinkingBudget"));
@@ -1773,6 +1795,47 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
     public void test_isGemini3_doesNotMatchGemini30() {
         // Hypothetical "gemini-30-..." id MUST NOT be classified as Gemini 3 generation.
         assertFalse(GeminiLlmClient.isGemini3("gemini-30-flash"));
+    }
+
+    @Test
+    public void test_supportsMinimalThinking_flashAndFlashLite() {
+        assertTrue(GeminiLlmClient.supportsMinimalThinking("gemini-3-flash"));
+        assertTrue(GeminiLlmClient.supportsMinimalThinking("gemini-3-flash-preview"));
+        assertTrue(GeminiLlmClient.supportsMinimalThinking("gemini-3.1-flash-lite-preview"));
+    }
+
+    @Test
+    public void test_supportsMinimalThinking_proNotSupported() {
+        // Gemini 3 Pro / 3.1 Pro explicitly do NOT support the MINIMAL thinking level.
+        assertFalse(GeminiLlmClient.supportsMinimalThinking("gemini-3-pro"));
+        assertFalse(GeminiLlmClient.supportsMinimalThinking("gemini-3.1-pro"));
+    }
+
+    @Test
+    public void test_supportsMinimalThinking_nonGemini3() {
+        // MINIMAL is a Gemini 3 concept — Gemini 2.x and earlier are out of scope.
+        assertFalse(GeminiLlmClient.supportsMinimalThinking("gemini-2.5-flash"));
+        assertFalse(GeminiLlmClient.supportsMinimalThinking("gemini-1.5-flash"));
+    }
+
+    @Test
+    public void test_budgetToThinkingLevel_minimalForFlashWhenZero() {
+        assertEquals("MINIMAL", GeminiLlmClient.budgetToThinkingLevel(0, "gemini-3-flash"));
+        assertEquals("MINIMAL", GeminiLlmClient.budgetToThinkingLevel(-1, "gemini-3.1-flash-lite-preview"));
+    }
+
+    @Test
+    public void test_budgetToThinkingLevel_lowForProWhenZero() {
+        assertEquals("LOW", GeminiLlmClient.budgetToThinkingLevel(0, "gemini-3.1-pro"));
+        assertEquals("LOW", GeminiLlmClient.budgetToThinkingLevel(-1, "gemini-3-pro"));
+    }
+
+    @Test
+    public void test_budgetToThinkingLevel_mediumAndHighIgnoreModel() {
+        assertEquals("MEDIUM", GeminiLlmClient.budgetToThinkingLevel(2048, "gemini-3.1-pro"));
+        assertEquals("MEDIUM", GeminiLlmClient.budgetToThinkingLevel(4096, "gemini-3-flash"));
+        assertEquals("HIGH", GeminiLlmClient.budgetToThinkingLevel(8192, "gemini-3-flash"));
+        assertEquals("HIGH", GeminiLlmClient.budgetToThinkingLevel(8192, "gemini-3.1-pro"));
     }
 
     // ========== Stream completion log diagnostics tests ==========
