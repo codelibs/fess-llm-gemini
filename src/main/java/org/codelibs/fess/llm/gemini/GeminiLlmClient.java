@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
@@ -35,6 +36,7 @@ import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
+import org.codelibs.fess.gemini.GeminiApiUrl;
 import org.codelibs.fess.llm.AbstractLlmClient;
 import org.codelibs.fess.llm.LlmChatRequest;
 import org.codelibs.fess.llm.LlmChatResponse;
@@ -42,6 +44,7 @@ import org.codelibs.fess.llm.LlmException;
 import org.codelibs.fess.llm.LlmMessage;
 import org.codelibs.fess.llm.LlmStreamCallback;
 import org.codelibs.fess.util.ComponentUtil;
+import org.codelibs.fess.util.CredentialUrlUtil;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -63,6 +66,9 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     /** Gemini role for model responses (equivalent to "assistant" in OpenAI). */
     protected static final String ROLE_MODEL = "model";
+
+    /** Configuration property holding the API endpoint; named in the URL-rejection message. */
+    private static final String API_URL_CONFIG_KEY = "rag.llm.gemini.api.url";
 
     /**
      * Summary of a single streamChat invocation. Exposed for diagnostics, not part of the LLM SPI.
@@ -108,6 +114,13 @@ public class GeminiLlmClient extends AbstractLlmClient {
         }
     }
 
+    /**
+     * Whether the userinfo-bearing {@code api.url} has already been reported. The availability
+     * probe runs on a timer, so an unguarded ERROR would repeat the same line forever; this latches
+     * it to one report per broken configuration and re-arms once the URL is fixed.
+     */
+    private final AtomicBoolean userInfoApiUrlReported = new AtomicBoolean();
+
     /** Test hook; not thread-safe. Set once before invoking streamChat from a single thread. */
     private java.util.function.Consumer<StreamSummary> streamSummaryConsumer;
 
@@ -134,6 +147,12 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     @Override
     protected boolean checkAvailabilityNow() {
+        final String apiUrl = getApiUrl();
+        // Checked before the API key, because an operator who put credentials in the URL has
+        // usually left the key unset; reporting only "apiKey is blank" would hide the real problem.
+        if (reportUserInfoApiUrl(apiUrl)) {
+            return false;
+        }
         final String apiKey = getApiKey();
         if (StringUtil.isBlank(apiKey)) {
             if (logger.isDebugEnabled()) {
@@ -141,29 +160,31 @@ public class GeminiLlmClient extends AbstractLlmClient {
             }
             return false;
         }
-        final String apiUrl = getApiUrl();
         if (StringUtil.isBlank(apiUrl)) {
             if (logger.isDebugEnabled()) {
                 logger.debug("[LLM:GEMINI] Gemini is not available. apiUrl is blank");
             }
             return false;
         }
+        final String maskedUrl = maskApiKeyInUrl(apiUrl);
         try {
             final String url = apiUrl + "/models";
-            final HttpGet request = new HttpGet(url);
+            final HttpGet request = GeminiApiUrl.createGet(url, API_URL_CONFIG_KEY);
             request.addHeader("x-goog-api-key", apiKey);
             try (var response = getHttpClient().execute(request)) {
                 final int statusCode = response.getCode();
                 final boolean available = statusCode >= 200 && statusCode < 300;
                 if (logger.isDebugEnabled()) {
-                    logger.debug("[LLM:GEMINI] Gemini availability check. url={}, statusCode={}, available={}", apiUrl, statusCode,
+                    logger.debug("[LLM:GEMINI] Gemini availability check. url={}, statusCode={}, available={}", maskedUrl, statusCode,
                             available);
                 }
                 return available;
             }
         } catch (final Exception e) {
             if (logger.isDebugEnabled()) {
-                logger.debug("[LLM:GEMINI] Gemini is not available. url={}, error={}", apiUrl, e.getMessage());
+                // The URI-rejection message no longer carries the URL at all; masking here as well
+                // covers any other exception on this branch whose message may quote it.
+                logger.debug("[LLM:GEMINI] Gemini is not available. url={}, error={}", maskedUrl, maskApiKeyInUrl(e.getMessage()));
             }
             return false;
         }
@@ -171,6 +192,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     @Override
     public LlmChatResponse chat(final LlmChatRequest request) {
+        requireNoUserInfoApiUrl();
         final String model = getModelName(request);
         final String url = buildApiUrl(model, false);
         final Map<String, Object> requestBody = buildRequestBody(request);
@@ -186,7 +208,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
             if (logger.isDebugEnabled()) {
                 logger.debug("[LLM:GEMINI] requestBody={}", json);
             }
-            final HttpPost httpRequest = new HttpPost(url);
+            final HttpPost httpRequest = GeminiApiUrl.createPost(url, API_URL_CONFIG_KEY);
             httpRequest.addHeader("x-goog-api-key", getApiKey());
             httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
 
@@ -314,6 +336,13 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     @Override
     public void streamChat(final LlmChatRequest request, final LlmStreamCallback callback) {
+        try {
+            requireNoUserInfoApiUrl();
+        } catch (final LlmException e) {
+            // Mirrors the LlmException handling below: the callback owns the user-visible error.
+            callback.onError(e);
+            throw e;
+        }
         final String model = getModelName(request);
         final String url = buildApiUrl(model, true);
         final Map<String, Object> requestBody = buildRequestBody(request);
@@ -329,7 +358,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
             if (logger.isDebugEnabled()) {
                 logger.debug("[LLM:GEMINI] requestBody={}", json);
             }
-            final HttpPost httpRequest = new HttpPost(url);
+            final HttpPost httpRequest = GeminiApiUrl.createPost(url, API_URL_CONFIG_KEY);
             httpRequest.addHeader("x-goog-api-key", getApiKey());
             httpRequest.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
 
@@ -692,16 +721,70 @@ public class GeminiLlmClient extends AbstractLlmClient {
     }
 
     /**
-     * Masks the API key in a URL by replacing the key value with "***".
+     * Reports a userinfo-bearing {@code api.url} and tells the caller to treat the client as
+     * unavailable.
      *
-     * @param url the URL that may contain an API key parameter
-     * @return the URL with the API key masked
+     * <p>This is deliberately a fail-closed report rather than a thrown exception. The availability
+     * check is reachable from {@code init()}, which LastaDi runs as a {@code postConstruct} while
+     * assembling the container: an exception escaping it aborts the assembly and stops the server
+     * from starting, turning one mistyped property into a total outage. Reporting the client
+     * unavailable degrades exactly the feature that cannot work, which is all a userinfo-bearing
+     * URL can ever do anyway - HttpClient rejects such a request URI unconditionally, so the
+     * endpoint was already unreachable; only the diagnosis changes.
+     *
+     * <p>The ERROR is emitted once per broken configuration, because the availability check runs on
+     * a timer and would otherwise repeat it for the lifetime of the JVM. It names the setting and
+     * the supported alternative but never any part of the URL.
+     *
+     * @param apiUrl the configured API URL (may be {@code null} or blank)
+     * @return {@code true} when the URL carries userinfo and no request may be issued
+     */
+    protected boolean reportUserInfoApiUrl(final String apiUrl) {
+        if (!CredentialUrlUtil.hasUserInfo(apiUrl)) {
+            userInfoApiUrlReported.set(false);
+            return false;
+        }
+        if (userInfoApiUrlReported.compareAndSet(false, true)) {
+            logger.error("[LLM:GEMINI] Gemini is not available. {}", GeminiApiUrl.userInfoRejectionMessage(API_URL_CONFIG_KEY));
+        }
+        return true;
+    }
+
+    /**
+     * Refuses a userinfo-bearing {@code api.url} before a request URI is built from it.
+     *
+     * <p>Throwing is safe here in a way it is not in the availability check: this runs only on an
+     * explicit {@code chat}/{@code streamChat} call, never during container initialization. The
+     * refusal replaces an opaque failure raised deep inside HttpClient whose surrounding log lines
+     * render the configured URL through a mask that whitespace in the credential defeats.
+     *
+     * @throws LlmException if the configured API URL carries a userinfo component
+     */
+    protected void requireNoUserInfoApiUrl() {
+        if (CredentialUrlUtil.hasUserInfo(getApiUrl())) {
+            throw new LlmException(GeminiApiUrl.userInfoRejectionMessage(API_URL_CONFIG_KEY), LlmException.ERROR_CONNECTION);
+        }
+    }
+
+    /**
+     * Masks credentials embedded in a URL before it reaches the log.
+     *
+     * <p>{@code rag.llm.gemini.api.url} may carry a credential as a query parameter - Gemini
+     * documents {@code ?key=...} as an alternative to the {@code x-goog-api-key} header - and that
+     * is the only credential-in-URL form this method actually has to handle in practice: a
+     * userinfo-bearing URL is refused up front by {@link #reportUserInfoApiUrl(String)} and
+     * {@link #requireNoUserInfoApiUrl()}, so no call site reaches a log statement with one. The
+     * userinfo rule in the shared masker is kept only as a backstop for any future path that logs a
+     * URL without passing a refusal first; it must not be relied on, since its pattern cannot match
+     * a credential containing whitespace. The shared
+     * {@link CredentialUrlUtil#maskCredentialInUrl(String)} defines exactly which forms are masked, so
+     * this client and the embedding client cannot drift apart.
+     *
+     * @param url the URL that may contain a credential (may be {@code null})
+     * @return the URL with credential values replaced by {@code ***}, or {@code null} when input is null
      */
     protected String maskApiKeyInUrl(final String url) {
-        if (url == null) {
-            return null;
-        }
-        return url.replaceAll("([?&])key=[^&]*", "$1key=***");
+        return CredentialUrlUtil.maskCredentialInUrl(url);
     }
 
     /**
@@ -719,7 +802,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
      * @return the API URL
      */
     protected String getApiUrl() {
-        return ComponentUtil.getFessConfig().getOrDefault("rag.llm.gemini.api.url", "https://generativelanguage.googleapis.com/v1beta");
+        return ComponentUtil.getFessConfig().getOrDefault(API_URL_CONFIG_KEY, "https://generativelanguage.googleapis.com/v1beta");
     }
 
     @Override

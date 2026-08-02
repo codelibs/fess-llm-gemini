@@ -24,10 +24,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configurator;
 import org.apache.logging.log4j.core.config.Property;
+import org.codelibs.fess.gemini.GeminiApiUrl;
+import org.codelibs.fess.util.CredentialUrlUtil;
 import org.codelibs.fess.llm.LlmChatRequest;
 import org.codelibs.fess.llm.LlmChatResponse;
 import org.codelibs.fess.llm.LlmException;
@@ -1716,6 +1720,497 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
                 masked);
     }
 
+    /**
+     * {@code rag.llm.gemini.api.url} may point at a gateway that carries its credential as
+     * RFC 3986 userinfo rather than as Gemini's documented {@code ?key=...} parameter; that form
+     * is logged at WARN on every API error, so it must be masked too.
+     */
+    @Test
+    public void test_maskApiKeyInUrl_userInfo() {
+        setupClientForMockServer();
+        assertEquals("https://***:***@gw.example.com/v1beta", client.testMaskApiKeyInUrl("https://u:secret@gw.example.com/v1beta"));
+        assertEquals("http://***:***@gw.example.com:8080/v1beta", client.testMaskApiKeyInUrl("http://u:secret@gw.example.com:8080/v1beta"));
+        // Both credential styles at once.
+        assertEquals("https://***:***@gw.example.com/v1beta?key=***",
+                client.testMaskApiKeyInUrl("https://u:secret@gw.example.com/v1beta?key=AIzaSecret"));
+        // An '@' later in the path must not be mistaken for a userinfo delimiter.
+        assertEquals("https://gw.example.com/v1beta/a:b@c", client.testMaskApiKeyInUrl("https://gw.example.com/v1beta/a:b@c"));
+    }
+
+    /** Every credential-bearing parameter spelling a gateway may use must be masked, case-insensitively. */
+    @Test
+    public void test_maskApiKeyInUrl_parameterSpellings() {
+        setupClientForMockServer();
+        assertEquals("https://host/v1beta?key=***", client.testMaskApiKeyInUrl("https://host/v1beta?key=AIzaSecret"));
+        assertEquals("https://host/v1beta?api_key=***&api-key=***&apikey=***",
+                client.testMaskApiKeyInUrl("https://host/v1beta?api_key=s1&api-key=s2&apikey=s3"));
+        assertEquals("https://host/v1beta?token=***&access_token=***&access-token=***",
+                client.testMaskApiKeyInUrl("https://host/v1beta?token=s1&access_token=s2&access-token=s3"));
+        // Uppercase and mixed-case parameter names must be masked as well.
+        assertEquals("https://host/v1beta?KEY=***", client.testMaskApiKeyInUrl("https://host/v1beta?KEY=AIzaSecret"));
+        assertEquals("https://host/v1beta?API_KEY=***&Token=***", client.testMaskApiKeyInUrl("https://host/v1beta?API_KEY=s1&Token=s2"));
+        assertNull(client.testMaskApiKeyInUrl(null));
+    }
+
+    /**
+     * A credential-free URL must survive verbatim. The {@code host:port} colon is the trap here:
+     * a userinfo pattern that is not anchored to the authority would mask {@code gw.example.com:8443}.
+     */
+    @Test
+    public void test_maskApiKeyInUrl_cleanUrlWithPortUnchanged() {
+        setupClientForMockServer();
+        assertEquals("https://gw.example.com:8443/v1beta", client.testMaskApiKeyInUrl("https://gw.example.com:8443/v1beta"));
+        assertEquals("http://localhost:8080/v1beta/models", client.testMaskApiKeyInUrl("http://localhost:8080/v1beta/models"));
+        assertEquals("https://host/v1beta?alt=json", client.testMaskApiKeyInUrl("https://host/v1beta?alt=json"));
+        assertEquals("https://host/v1beta", client.testMaskApiKeyInUrl("https://host/v1beta"));
+    }
+
+    /**
+     * The availability check logs the configured {@code apiUrl} verbatim; when that URL carries
+     * Gemini's documented {@code ?key=...} credential the debug log must not leak it.
+     */
+    @Test
+    public void test_checkAvailabilityNow_successLogMasksCredential() {
+        mockServer.enqueue(new MockResponse().setBody("{\"models\":[]}").addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+        client.setTestApiUrl(client.getApiUrl() + "?key=" + AVAILABILITY_SECRET);
+
+        final List<String> logs = captureDebugLogs(() -> assertTrue(client.isAvailable()));
+
+        final String line = findLog(logs, "Gemini availability check.");
+        assertNotNull(line, "availability-check debug log not captured: " + logs);
+        assertTrue("credential not masked: " + line, line.contains("key=***"));
+        assertNoSecret(logs);
+    }
+
+    /**
+     * Same requirement on the failure branch, which logs the URL when the availability probe
+     * throws — the branch a misconfigured gateway actually hits.
+     *
+     * <p>The credential is carried as Gemini's documented {@code ?key=...} parameter, which is the
+     * only credential-in-URL form that still reaches this log: a userinfo-bearing URL is now
+     * refused before the probe runs (see
+     * {@link #test_checkAvailabilityNow_userInfoApiUrl_reportsUnavailableWithRemedy()}), so no log
+     * statement on this branch ever renders one.
+     */
+    @Test
+    public void test_checkAvailabilityNow_failureLogMasksCredential() {
+        setupClientForMockServer();
+        // Port 1 refuses immediately, so the probe throws and takes the error-logging branch.
+        client.setTestApiUrl("http://127.0.0.1:1/v1beta?key=" + AVAILABILITY_SECRET);
+
+        final List<String> logs = captureDebugLogs(() -> assertFalse(client.isAvailable()));
+
+        final String line = findLog(logs, "Gemini is not available. url=");
+        assertNotNull(line, "availability-failure debug log not captured: " + logs);
+        assertTrue("query credential not masked: " + line, line.contains("key=***"));
+        assertNoSecret(logs);
+    }
+
+    /**
+     * The failure branch also logs the exception message, and the exception raised while building
+     * the request quotes the offending URI verbatim - so the message needs the same masking as the
+     * URL placeholder next to it.
+     */
+    @Test
+    public void test_checkAvailabilityNow_failureLogMasksCredentialInExceptionMessage() {
+        setupClientForMockServer();
+        // '|' is illegal in a URI query, so HttpGet rejects the URI with the full URI in its message.
+        client.setTestApiUrl("http://127.0.0.1:1/v1beta?key=" + AVAILABILITY_SECRET + "|x");
+
+        final List<String> logs = captureDebugLogs(() -> assertFalse(client.isAvailable()));
+
+        final String line = findLog(logs, "Gemini is not available. url=");
+        assertNotNull(line, "availability-failure debug log not captured: " + logs);
+        assertNoSecret(logs);
+    }
+
+    /**
+     * A malformed {@code api.url} is rejected while the request object is being built, and the
+     * {@link IllegalArgumentException} raised there quotes the offending URI in full. That is the
+     * dominant leak channel for the only credential-in-URL form a working configuration can carry -
+     * Gemini's documented {@code ?key=...} parameter - and it escapes on three routes at once: the
+     * {@code error={}} argument, the throwable attached to the same log statement, and the cause of
+     * the exception handed to the caller. Masking the argument alone closes one of the three.
+     */
+    @Test
+    public void test_chat_malformedApiUrlDoesNotLeakCredential() {
+        setupClientForMockServer();
+        // '|' is illegal in a URI query, so building the request rejects the URI and quotes it.
+        client.setTestApiUrl("http://127.0.0.1:1/v1beta?key=" + AVAILABILITY_SECRET + "|x");
+        final AtomicReference<Throwable> thrown = new AtomicReference<>();
+
+        final List<String> logs = captureDebugLogs(() -> {
+            try {
+                client.chat(new LlmChatRequest().addUserMessage("hello"));
+                fail("expected the malformed api.url to fail the call");
+            } catch (final RuntimeException e) {
+                thrown.set(e);
+            }
+        });
+
+        assertNotNull(findLog(logs, "Failed to call Gemini API."), "failure log not captured: " + logs);
+        assertNoSecret(logs);
+        assertNoSecretInChain(thrown.get());
+    }
+
+    /**
+     * The streaming path builds its request the same way, but its catch clauses cover only
+     * {@code IOException} and {@code ParseException}, so the URI-rejection exception escapes
+     * {@code streamChat} uncaught and reaches the caller directly. No amount of masking at the log
+     * statements covers that route - only masking where the URI is built does.
+     */
+    @Test
+    public void test_streamChat_malformedApiUrlDoesNotLeakCredential() {
+        setupClientForMockServer();
+        client.setTestApiUrl("http://127.0.0.1:1/v1beta?key=" + AVAILABILITY_SECRET + "|x");
+        final AtomicReference<Throwable> thrown = new AtomicReference<>();
+        final AtomicReference<Throwable> callbackError = new AtomicReference<>();
+
+        final List<String> logs = captureDebugLogs(() -> {
+            try {
+                client.streamChat(new LlmChatRequest().addUserMessage("hello"), new LlmStreamCallback() {
+                    @Override
+                    public void onChunk(final String content, final boolean done) {
+                        // no-op
+                    }
+
+                    @Override
+                    public void onError(final Throwable error) {
+                        callbackError.set(error);
+                    }
+                });
+                fail("expected the malformed api.url to fail the stream");
+            } catch (final RuntimeException e) {
+                thrown.set(e);
+            }
+        });
+
+        assertNoSecret(logs);
+        assertNoSecretInChain(thrown.get());
+        if (callbackError.get() != null) {
+            assertNoSecretInChain(callbackError.get());
+        }
+    }
+
+    /**
+     * A URL is unparseable precisely because it contains a character the masking patterns exclude,
+     * so on this path those patterns are least likely to match: the userinfo pattern excludes
+     * whitespace, so a password containing a space - entirely plausible - is not masked at all.
+     * The replacement exception must therefore carry nothing derived from the URL, only the parser
+     * constants and the name of the setting to look at.
+     *
+     * <p>Scope is the exception itself - message, throwable, cause chain - which is what travels to
+     * callers and upstream loggers. The {@code url={}} placeholders alongside it mask on a
+     * best-effort basis and are unaffected by this test.
+     */
+    @Test
+    public void test_chat_malformedApiUrlWithSpacedCredentialDoesNotLeakThroughException() {
+        setupClientForMockServer();
+        // The space makes the URI unparseable and defeats the userinfo mask, which excludes whitespace.
+        client.setTestApiUrl("https://user:" + SPACED_SECRET + "@127.0.0.1:1/v1beta");
+        Throwable thrown = null;
+
+        try {
+            client.chat(new LlmChatRequest().addUserMessage("hello"));
+            fail("expected the malformed api.url to fail the call");
+        } catch (final RuntimeException e) {
+            thrown = e;
+        }
+
+        assertNoSecretInChain(thrown, SPACED_SECRET);
+        assertNotNull(findInChain(thrown, "rag.llm.gemini.api.url"), "the setting to look at is not named anywhere in the chain");
+    }
+
+    /** Distinctive credential value used by the availability-check log tests. */
+    private static final String AVAILABILITY_SECRET = "AIzaSyLeakCanary";
+
+    /**
+     * Credential whose own value contains a space, so the userinfo mask - which excludes
+     * whitespace - cannot match it.
+     */
+    private static final String SPACED_SECRET = "AIza Sy Leak Canary";
+
+    /** Fails if any captured log line contains the credential value. */
+    private void assertNoSecret(final List<String> logs) {
+        assertNoSecret(logs, AVAILABILITY_SECRET);
+    }
+
+    /** Same, for a test that uses its own credential value. */
+    private void assertNoSecret(final List<String> logs, final String secret) {
+        for (final String m : logs) {
+            assertFalse("credential leaked into log: " + m, m.contains(secret));
+        }
+    }
+
+    /** Returns the number of captured log lines containing {@code needle}. */
+    private static int countLogs(final List<String> logs, final String needle) {
+        int count = 0;
+        for (final String m : logs) {
+            if (m.contains(needle)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Renders a log event the way a layout would: the formatted message followed by the whole
+     * throwable chain, which a stack trace prints in full.
+     */
+    private static String renderLogEvent(final LogEvent event) {
+        final StringBuilder buf = new StringBuilder(event.getMessage().getFormattedMessage());
+        Throwable thrown = event.getThrown();
+        for (int depth = 0; thrown != null && depth < 16; thrown = thrown.getCause(), depth++) {
+            buf.append(" | thrown: ").append(thrown.getClass().getName()).append(": ").append(thrown.getMessage());
+        }
+        return buf.toString();
+    }
+
+    /**
+     * Fails if the credential value survives anywhere in a thrown exception's cause chain. This is
+     * the channel that outlives the client: the exception is handed to callers and to every
+     * upstream logger, which render the chain in full.
+     */
+    private void assertNoSecretInChain(final Throwable thrown) {
+        assertNoSecretInChain(thrown, AVAILABILITY_SECRET);
+    }
+
+    /** Same, for a test that uses its own credential value. */
+    private void assertNoSecretInChain(final Throwable thrown, final String secret) {
+        assertTrue("no exception was thrown", thrown != null);
+        Throwable cause = thrown;
+        for (int depth = 0; cause != null && depth < 16; cause = cause.getCause(), depth++) {
+            final String message = cause.getMessage();
+            assertFalse("credential leaked through exception " + cause.getClass().getName() + ": " + message,
+                    message != null && message.contains(secret));
+        }
+    }
+
+    /** Returns the first message in the chain containing {@code needle}, or null if none. */
+    private static String findInChain(final Throwable thrown, final String needle) {
+        Throwable cause = thrown;
+        for (int depth = 0; cause != null && depth < 16; cause = cause.getCause(), depth++) {
+            if (cause.getMessage() != null && cause.getMessage().contains(needle)) {
+                return cause.getMessage();
+            }
+        }
+        return null;
+    }
+
+    /** Returns the first captured log line containing {@code needle}, or null if none. */
+    private static String findLog(final List<String> logs, final String needle) {
+        for (final String m : logs) {
+            if (m.contains(needle)) {
+                return m;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Runs {@code action} with the GeminiLlmClient logger forced to DEBUG and a capturing appender
+     * attached, restoring both afterwards so the logger configuration is left untouched for
+     * subsequent tests.
+     */
+    private List<String> captureDebugLogs(final Runnable action) {
+        final org.apache.logging.log4j.core.Logger coreLogger =
+                (org.apache.logging.log4j.core.Logger) LogManager.getLogger(GeminiLlmClient.class);
+        final Level previousLevel = coreLogger.getLevel();
+        final CapturingAppender appender = new CapturingAppender();
+        appender.start();
+        coreLogger.addAppender(appender);
+        Configurator.setLevel(GeminiLlmClient.class.getName(), Level.DEBUG);
+        try {
+            action.run();
+        } finally {
+            Configurator.setLevel(GeminiLlmClient.class.getName(), previousLevel);
+            coreLogger.removeAppender(appender);
+            appender.stop();
+        }
+        return appender.snapshot();
+    }
+
+    // ========== userinfo-bearing api.url rejection ==========
+
+    /**
+     * Credential embedded as RFC 3986 userinfo. Its value contains spaces on purpose: that is the
+     * input class the masking regex cannot handle, and it is exactly what a refusal has to keep out
+     * of every channel without relying on masking.
+     */
+    private static final String USERINFO_SECRET = "AIza Sy Leak Canary";
+
+    /**
+     * A configured endpoint whose authority carries userinfo. The host is deliberately
+     * non-resolvable: a correct refusal never resolves it, so a test that accidentally lets the
+     * request through fails on the request count rather than on a slow DNS lookup.
+     */
+    private static String userInfoApiUrl() {
+        return "https://gemini:" + USERINFO_SECRET + "@gw.example.com:8443/v1beta";
+    }
+
+    /**
+     * HttpClient rejects a request URI whose authority carries userinfo (RFC 9110 4.2.4), so such
+     * an {@code api.url} can never issue a request. The client must therefore report itself
+     * unavailable and say what to do instead, rather than fail opaquely on every probe.
+     */
+    @Test
+    public void test_checkAvailabilityNow_userInfoApiUrl_reportsUnavailableWithRemedy() {
+        setupClientForMockServer();
+        client.setTestApiUrl(userInfoApiUrl());
+
+        final List<String> logs = captureDebugLogs(() -> assertFalse(client.isAvailable()));
+
+        // assertNotNull here takes (actual, message) - the (message, actual) order silently binds
+        // the message as the value under test and can never fail.
+        assertNotNull(findLog(logs, "http.proxy.username"), "the supported alternative is not named in any log line: " + logs);
+        assertNotNull(findLog(logs, "http.proxy.password"), "the supported alternative is not named in any log line: " + logs);
+        assertNotNull(findLog(logs, "rag.llm.gemini.api.url"), "the offending setting is not named in any log line: " + logs);
+        assertNoSecret(logs, USERINFO_SECRET);
+        assertEquals("a userinfo-bearing api.url must not issue a request", 0, mockServer.getRequestCount());
+    }
+
+    /**
+     * The refusal must be a false return, never a throw. {@code init()} runs as a LastaDi
+     * {@code postConstruct} and reaches this method synchronously through
+     * {@code startAvailabilityCheck()} -&gt; {@code updateAvailability()}, neither of which catches
+     * anything; an exception escaping here would abort container assembly and stop the server from
+     * starting over one mistyped property.
+     */
+    @Test
+    public void test_checkAvailabilityNow_userInfoApiUrl_failsClosedInsteadOfThrowing() {
+        setupClientForMockServer();
+        client.setTestApiUrl(userInfoApiUrl());
+
+        assertFalse(client.checkAvailabilityNow());
+    }
+
+    /**
+     * The availability probe runs on a timer, so a per-call ERROR would fill the log with the same
+     * line forever. It has to be reported once for as long as the configuration stays broken.
+     */
+    @Test
+    public void test_checkAvailabilityNow_userInfoApiUrl_errorLoggedOncePerConfiguration() {
+        setupClientForMockServer();
+        client.setTestApiUrl(userInfoApiUrl());
+
+        final List<String> logs = captureDebugLogs(() -> {
+            assertFalse(client.isAvailable());
+            assertFalse(client.isAvailable());
+            assertFalse(client.isAvailable());
+        });
+
+        assertEquals("the configuration error must be reported once, not once per call: " + logs, 1,
+                countLogs(logs, "http.proxy.username"));
+    }
+
+    /**
+     * A {@code host:port} authority also contains a colon but no {@code @}, so it is not userinfo.
+     * The mock server URL is exactly that shape, and it must keep probing normally.
+     */
+    @Test
+    public void test_checkAvailabilityNow_hostWithPortIsNotUserInfo() {
+        mockServer.enqueue(new MockResponse().setBody("{\"models\":[]}").addHeader("Content-Type", "application/json"));
+        setupClientForMockServer();
+
+        final List<String> logs = captureDebugLogs(() -> assertTrue(client.isAvailable()));
+
+        assertNull(findLog(logs, "http.proxy.username"), "a host:port authority must not be mistaken for userinfo: " + logs);
+        assertEquals(1, mockServer.getRequestCount());
+    }
+
+    /**
+     * The refusal also has to reach the chat path, which builds its request URI from the same
+     * setting: without it the call fails deep inside HttpClient and the failure log renders the raw
+     * URL through a mask that whitespace in the credential defeats.
+     */
+    @Test
+    public void test_chat_userInfoApiUrl_refusedBeforeAnyRequest() {
+        setupClientForMockServer();
+        client.setTestApiUrl(userInfoApiUrl());
+        final AtomicReference<Throwable> thrown = new AtomicReference<>();
+
+        final List<String> logs = captureDebugLogs(() -> {
+            try {
+                client.chat(new LlmChatRequest().addUserMessage("hello"));
+                fail("expected the userinfo-bearing api.url to be refused");
+            } catch (final RuntimeException e) {
+                thrown.set(e);
+            }
+        });
+
+        assertNoSecret(logs, USERINFO_SECRET);
+        assertNoSecretInChain(thrown.get(), USERINFO_SECRET);
+        assertNotNull(findInChain(thrown.get(), "http.proxy.username"), "the supported alternative is not named in the chain");
+        assertNotNull(findInChain(thrown.get(), "rag.llm.gemini.api.url"), "the offending setting is not named in the chain");
+        assertEquals("a userinfo-bearing api.url must not issue a request", 0, mockServer.getRequestCount());
+    }
+
+    /**
+     * The detection itself, as a pure function. It is structural - the authority is delimited by
+     * {@code ://} and by the first {@code /}, {@code ?}, or {@code #} - rather than pattern-based,
+     * so a credential containing whitespace (the input class that defeats the masking pattern) is
+     * still detected, while a {@code host:port} authority and a later {@code @} are not false
+     * positives.
+     */
+    @Test
+    public void test_hasUserInfo_structuralDetection() {
+        // Credential-bearing authorities.
+        assertTrue(CredentialUrlUtil.hasUserInfo("https://u:secret@gw.example.com/v1beta"));
+        assertTrue(CredentialUrlUtil.hasUserInfo("http://u:secret@gw.example.com:8080/v1beta"));
+        // No password, and no path at all.
+        assertTrue(CredentialUrlUtil.hasUserInfo("https://token@gw.example.com"));
+        // Whitespace inside the credential: masked incorrectly by the pattern, detected here.
+        assertTrue(CredentialUrlUtil.hasUserInfo("https://u:AIza Sy Leak@gw.example.com:8443/v1beta"));
+        // Authority terminated by '?' and by '#' rather than by '/'.
+        assertTrue(CredentialUrlUtil.hasUserInfo("https://u:secret@gw.example.com?alt=json"));
+        assertTrue(CredentialUrlUtil.hasUserInfo("https://u:secret@gw.example.com#frag"));
+
+        // A host:port authority carries a colon but no '@'.
+        assertFalse(CredentialUrlUtil.hasUserInfo("https://gw.example.com:8443/v1beta"));
+        assertFalse(CredentialUrlUtil.hasUserInfo("https://generativelanguage.googleapis.com/v1beta"));
+        // An '@' outside the authority - in the path, or in a query value - is not userinfo.
+        assertFalse(CredentialUrlUtil.hasUserInfo("https://gw.example.com/v1beta/a:b@c"));
+        assertFalse(CredentialUrlUtil.hasUserInfo("https://gw.example.com:8443/v1beta?user=a@b"));
+        assertFalse(CredentialUrlUtil.hasUserInfo("https://gw.example.com/v1beta#a@b"));
+        // Nothing to inspect.
+        assertFalse(CredentialUrlUtil.hasUserInfo(null));
+        assertFalse(CredentialUrlUtil.hasUserInfo(""));
+        assertFalse(CredentialUrlUtil.hasUserInfo("gw.example.com/v1beta"));
+    }
+
+    /** Same for the streaming path, which must also notify the callback before propagating. */
+    @Test
+    public void test_streamChat_userInfoApiUrl_refusedBeforeAnyRequest() {
+        setupClientForMockServer();
+        client.setTestApiUrl(userInfoApiUrl());
+        final AtomicReference<Throwable> reported = new AtomicReference<>();
+        Throwable thrown = null;
+
+        try {
+            client.streamChat(new LlmChatRequest().addUserMessage("hello"), new LlmStreamCallback() {
+                @Override
+                public void onChunk(final String content, final boolean done) {
+                    fail("no chunk may be delivered for a refused api.url");
+                }
+
+                @Override
+                public void onError(final Throwable error) {
+                    reported.set(error);
+                }
+            });
+            fail("expected the userinfo-bearing api.url to be refused");
+        } catch (final RuntimeException e) {
+            thrown = e;
+        }
+
+        assertNotNull(reported.get(), "the stream callback was not notified of the refusal");
+        assertNoSecretInChain(thrown, USERINFO_SECRET);
+        assertNoSecretInChain(reported.get(), USERINFO_SECRET);
+        assertNotNull(findInChain(thrown, "http.proxy.username"), "the supported alternative is not named in the chain");
+        assertEquals("a userinfo-bearing api.url must not issue a request", 0, mockServer.getRequestCount());
+    }
+
     // ========== Model-aware thinking config tests ==========
 
     @Test
@@ -2415,7 +2910,14 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         }
     }
 
-    /** Log4j2 appender that records formatted messages for later assertion. */
+    /**
+     * Log4j2 appender that records each event's formatted message <em>and</em> its throwable chain.
+     *
+     * <p>A layout renders the throwable as a stack trace next to the message, so an assertion that
+     * only sees {@code getMessage().getFormattedMessage()} passes while the rendered log still
+     * leaks whatever the exception carries. Recording both makes the throwable channel visible to
+     * every capture-based assertion in this class.
+     */
     private static final class CapturingAppender extends AbstractAppender {
         private final List<String> messages = Collections.synchronizedList(new ArrayList<>());
 
@@ -2425,7 +2927,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
         @Override
         public void append(final LogEvent event) {
-            messages.add(event.getMessage().getFormattedMessage());
+            messages.add(renderLogEvent(event));
         }
 
         List<String> snapshot() {

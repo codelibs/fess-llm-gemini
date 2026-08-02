@@ -171,4 +171,9 @@
 + "{{languageInstruction}}"
 		</property>
 	</component>
+	<component name="geminiEmbeddingClient" class="org.codelibs.fess.embedding.gemini.GeminiEmbeddingClient">
+		<postConstruct name="register"/>
+		<postConstruct name="init"/>
+		<preDestroy name="destroy"/>
+	</component>
 </components>
