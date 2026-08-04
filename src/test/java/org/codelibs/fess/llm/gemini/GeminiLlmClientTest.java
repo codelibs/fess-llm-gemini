@@ -18,6 +18,7 @@ package org.codelibs.fess.llm.gemini;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -2293,44 +2294,426 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
+    public void test_isGemini3_blankGuardHandlesWhitespace() {
+        // Contract regression test, not a change detector: null, empty and whitespace-only have
+        // always classified as false here, so this cannot tell a bare null check from
+        // StringUtil.isBlank. It pins the contract the callers rely on -- most directly
+        // supportsMinimalThinking, which calls toLowerCase on the same id.
+        assertFalse(GeminiLlmClient.isGemini3(null));
+        assertFalse(GeminiLlmClient.isGemini3(""));
+        assertFalse(GeminiLlmClient.isGemini3("   "));
+    }
+
+    @Test
+    public void test_isGemini3_isCaseInsensitive() {
+        // A differently-cased id (e.g. from a gateway that normalizes casing) must classify the
+        // same as its lowercase form -- the truth table for ids the rule already recognised is
+        // otherwise unchanged.
+        assertTrue(GeminiLlmClient.isGemini3("GEMINI-3-FLASH"));
+        assertTrue(GeminiLlmClient.isGemini3("Gemini-3.1-Pro"));
+        assertTrue(GeminiLlmClient.isGemini3("GEMINI-3"));
+        assertFalse(GeminiLlmClient.isGemini3("GEMINI-2.5-FLASH"));
+    }
+
+    @Test
+    public void test_isGemini3_futureGenerationNotClassified() {
+        // A future generation id the prefix rule does not recognise falls through to false --
+        // this is exactly the silent-misclassification risk the configurable overrides
+        // (added in a later task) exist to let operators correct explicitly.
+        assertFalse(GeminiLlmClient.isGemini3("gemini-4"));
+        assertFalse(GeminiLlmClient.isGemini3("gemini-4-flash"));
+    }
+
+    @Test
     public void test_supportsMinimalThinking_flashAndFlashLite() {
-        assertTrue(GeminiLlmClient.supportsMinimalThinking("gemini-3-flash"));
-        assertTrue(GeminiLlmClient.supportsMinimalThinking("gemini-3-flash-preview"));
-        assertTrue(GeminiLlmClient.supportsMinimalThinking("gemini-3.1-flash-lite-preview"));
+        assertTrue(client.supportsMinimalThinking("gemini-3-flash"));
+        assertTrue(client.supportsMinimalThinking("gemini-3-flash-preview"));
+        assertTrue(client.supportsMinimalThinking("gemini-3.1-flash-lite-preview"));
     }
 
     @Test
     public void test_supportsMinimalThinking_proNotSupported() {
         // Gemini 3 Pro / 3.1 Pro explicitly do NOT support the MINIMAL thinking level.
-        assertFalse(GeminiLlmClient.supportsMinimalThinking("gemini-3-pro"));
-        assertFalse(GeminiLlmClient.supportsMinimalThinking("gemini-3.1-pro"));
+        assertFalse(client.supportsMinimalThinking("gemini-3-pro"));
+        assertFalse(client.supportsMinimalThinking("gemini-3.1-pro"));
     }
 
     @Test
     public void test_supportsMinimalThinking_nonGemini3() {
         // MINIMAL is a Gemini 3 concept — Gemini 2.x and earlier are out of scope.
-        assertFalse(GeminiLlmClient.supportsMinimalThinking("gemini-2.5-flash"));
-        assertFalse(GeminiLlmClient.supportsMinimalThinking("gemini-1.5-flash"));
+        assertFalse(client.supportsMinimalThinking("gemini-2.5-flash"));
+        assertFalse(client.supportsMinimalThinking("gemini-1.5-flash"));
+    }
+
+    @Test
+    public void test_supportsMinimalThinking_flashTestIsCaseInsensitive() throws Exception {
+        // Both halves of the auto inference must be case-insensitive. Testing only isGemini3
+        // hides the bug: with a case-sensitive flash check, "GEMINI-3-FLASH" is a Gemini 3 id
+        // whose lowest level silently becomes LOW instead of MINIMAL.
+        assertTrue("an upper-cased Flash id must still support MINIMAL", client.supportsMinimalThinking("GEMINI-3-FLASH"));
+        assertTrue("mixed case must behave the same as lower case", client.supportsMinimalThinking("Gemini-3.1-Flash-Lite-Preview"));
+        assertFalse("an upper-cased Pro id must still not support MINIMAL", client.supportsMinimalThinking("GEMINI-3-PRO"));
+
+        // ...and the resulting wire level at a non-positive budget, not just the predicate.
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+        final JsonNode body =
+                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "GEMINI-3-FLASH"));
+        assertEquals("MINIMAL", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
     }
 
     @Test
     public void test_budgetToThinkingLevel_minimalForFlashWhenZero() {
-        assertEquals("MINIMAL", GeminiLlmClient.budgetToThinkingLevel(0, "gemini-3-flash"));
-        assertEquals("MINIMAL", GeminiLlmClient.budgetToThinkingLevel(-1, "gemini-3.1-flash-lite-preview"));
+        assertEquals("MINIMAL", client.budgetToThinkingLevel(0, "gemini-3-flash"));
+        assertEquals("MINIMAL", client.budgetToThinkingLevel(-1, "gemini-3.1-flash-lite-preview"));
     }
 
     @Test
     public void test_budgetToThinkingLevel_lowForProWhenZero() {
-        assertEquals("LOW", GeminiLlmClient.budgetToThinkingLevel(0, "gemini-3.1-pro"));
-        assertEquals("LOW", GeminiLlmClient.budgetToThinkingLevel(-1, "gemini-3-pro"));
+        assertEquals("LOW", client.budgetToThinkingLevel(0, "gemini-3.1-pro"));
+        assertEquals("LOW", client.budgetToThinkingLevel(-1, "gemini-3-pro"));
     }
 
     @Test
     public void test_budgetToThinkingLevel_mediumAndHighIgnoreModel() {
-        assertEquals("MEDIUM", GeminiLlmClient.budgetToThinkingLevel(2048, "gemini-3.1-pro"));
-        assertEquals("MEDIUM", GeminiLlmClient.budgetToThinkingLevel(4096, "gemini-3-flash"));
-        assertEquals("HIGH", GeminiLlmClient.budgetToThinkingLevel(8192, "gemini-3-flash"));
-        assertEquals("HIGH", GeminiLlmClient.budgetToThinkingLevel(8192, "gemini-3.1-pro"));
+        assertEquals("MEDIUM", client.budgetToThinkingLevel(2048, "gemini-3.1-pro"));
+        assertEquals("MEDIUM", client.budgetToThinkingLevel(4096, "gemini-3-flash"));
+        assertEquals("HIGH", client.budgetToThinkingLevel(8192, "gemini-3-flash"));
+        assertEquals("HIGH", client.budgetToThinkingLevel(8192, "gemini-3.1-pro"));
+    }
+
+    // ========== getCapabilityOverride tests ==========
+    // Note: getConfigString itself is NOT exercised from this class -- TestableGeminiLlmClient
+    // overrides it wholesale against a HashMap, so a test here would only assert that the stub
+    // works. GeminiLlmClientCapabilityConfigTest covers the production implementation, including
+    // the key composition and the config channel it reads.
+
+    @Test
+    public void test_getCapabilityOverride_defaultsToAuto() {
+        // Unset means "infer from the model name" -- null, not FALSE. Returning FALSE here would
+        // silently force the capability off for every existing deployment.
+        assertNull(client.getCapabilityOverride("thinking.level.enabled"), "unset must resolve to auto (null)");
+    }
+
+    @Test
+    public void test_getCapabilityOverride_explicitAutoIsNull() {
+        client.setTestConfig("thinking.level.enabled", "auto");
+        assertNull(client.getCapabilityOverride("thinking.level.enabled"), "explicit auto must resolve to null");
+    }
+
+    @Test
+    public void test_getCapabilityOverride_forcedTrueAndFalse() {
+        client.setTestConfig("thinking.level.enabled", "true");
+        assertEquals(Boolean.TRUE, client.getCapabilityOverride("thinking.level.enabled"));
+        client.setTestConfig("thinking.level.enabled", "false");
+        assertEquals(Boolean.FALSE, client.getCapabilityOverride("thinking.level.enabled"));
+    }
+
+    @Test
+    public void test_getCapabilityOverride_isCaseInsensitive() {
+        client.setTestConfig("thinking.level.enabled", "TRUE");
+        assertEquals(Boolean.TRUE, client.getCapabilityOverride("thinking.level.enabled"));
+        client.setTestConfig("thinking.level.enabled", "False");
+        assertEquals(Boolean.FALSE, client.getCapabilityOverride("thinking.level.enabled"));
+        client.setTestConfig("thinking.level.enabled", "AUTO");
+        assertNull(client.getCapabilityOverride("thinking.level.enabled"), "AUTO in any case must resolve to null");
+    }
+
+    @Test
+    public void test_getCapabilityOverride_trimsSurroundingWhitespace() {
+        // Pins the defensive trim in getCapabilityOverride, so the parsing stays correct for a
+        // padded value on its own. In production the config channel already trims (FessConfigImpl
+        // -> filterPropertyAsDefault -> String.trim()), so a padded value never reaches it here.
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            client.setTestConfig("thinking.level.enabled", "true ");
+            assertEquals(Boolean.TRUE, client.getCapabilityOverride("thinking.level.enabled"));
+            client.setTestConfig("thinking.level.enabled", "  false");
+            assertEquals(Boolean.FALSE, client.getCapabilityOverride("thinking.level.enabled"));
+            client.setTestConfig("thinking.level.enabled", " auto ");
+            assertNull(client.getCapabilityOverride("thinking.level.enabled"), "padded auto must resolve to null");
+            client.setTestConfig("thinking.level.enabled", "   ");
+            assertNull(client.getCapabilityOverride("thinking.level.enabled"), "whitespace-only must resolve to auto");
+        });
+        assertTrue("a padded but valid value must not WARN, messages=" + messages, messages.isEmpty());
+    }
+
+    @Test
+    public void test_getCapabilityOverride_blankIsAutoWithoutWarning() {
+        // "key=" in a properties file reads as "left in place but unset", not as a typo.
+        client.setTestConfig("thinking.level.enabled", "");
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages,
+                () -> assertNull(client.getCapabilityOverride("thinking.level.enabled"), "blank must resolve to auto"));
+        assertTrue("blank must not WARN, messages=" + messages, messages.isEmpty());
+    }
+
+    @Test
+    public void test_getCapabilityOverride_unrecognizedDegradesToAutoAndWarnsOnce() {
+        // Degrades to auto, not to false: a typo must not silently disable a capability. The
+        // predicates run on every request, so the WARN is deduplicated per key/value.
+        client.setTestConfig("thinking.level.enabled", "ture");
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            assertNull(client.getCapabilityOverride("thinking.level.enabled"), "unrecognized value must degrade to auto");
+            assertNull(client.getCapabilityOverride("thinking.level.enabled"), "unrecognized value must degrade to auto");
+            assertNull(client.getCapabilityOverride("thinking.level.enabled"), "unrecognized value must degrade to auto");
+        });
+        final List<String> warns =
+                messages.stream().filter(s -> s.contains("rag.llm.gemini.thinking.level.enabled") && s.contains("ture")).toList();
+        assertEquals("an unrecognized value must WARN exactly once", 1, warns.size());
+    }
+
+    @Test
+    public void test_getCapabilityOverride_warnsAgainForADifferentBadValue() {
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            client.setTestConfig("thinking.level.enabled", "ture");
+            client.getCapabilityOverride("thinking.level.enabled");
+            client.setTestConfig("thinking.level.enabled", "yes");
+            client.getCapabilityOverride("thinking.level.enabled");
+        });
+        final List<String> warns = messages.stream().filter(s -> s.contains("rag.llm.gemini.thinking.level.enabled")).toList();
+        assertEquals("a second distinct bad value must be reported", 2, warns.size());
+    }
+
+    @Test
+    public void test_getCapabilityOverride_dedupIsKeyedByKeyAndValueNotByValueAlone() {
+        // The dedup token is "<keySuffix>=<value>". Keyed by the value alone, the same typo under
+        // a second key would be swallowed and never reported, so this varies the key under one
+        // fixed bad value.
+        final List<String> messages = new ArrayList<>();
+        runStreamWithCapturedLogs(messages, () -> {
+            client.setTestConfig("thinking.level.enabled", "ture");
+            client.setTestConfig("thinking.headroom.enabled", "ture");
+            client.getCapabilityOverride("thinking.level.enabled");
+            client.getCapabilityOverride("thinking.headroom.enabled");
+        });
+        final List<String> warns = messages.stream().filter(s -> s.contains("value: ture")).toList();
+        assertEquals("the same bad value under two keys must be reported once per key, warns=" + warns, 2, warns.size());
+        assertTrue("thinking.level.enabled must be named by its own WARN, warns=" + warns,
+                warns.stream().anyMatch(s -> s.contains("rag.llm.gemini.thinking.level.enabled")));
+        assertTrue("thinking.headroom.enabled must be named by its own WARN, warns=" + warns,
+                warns.stream().anyMatch(s -> s.contains("rag.llm.gemini.thinking.headroom.enabled")));
+    }
+
+    // ========== usesThinkingLevel / usesThinkingHeadroom / supportsMinimalThinking wiring ==========
+    // These assert on the outgoing request body (or the maxOutputTokens it feeds into), not just
+    // on the predicate return value -- the point of the override is which field reaches the wire.
+
+    @Test
+    public void test_thinkingLevelEnabled_autoFollowsNameRule() throws Exception {
+        // No setupClientForMockServer(): testBuildRequestBodyForModel never touches the network.
+        client.setTestConfig("thinking.level.enabled", "auto");
+
+        // Gemini 3 name -> thinkingLevel, not thinkingBudget.
+        final LlmChatRequest gemini3Request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+        final JsonNode gemini3Body = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(client.testBuildRequestBodyForModel(gemini3Request, "gemini-3-flash"));
+        final JsonNode gemini3Thinking = gemini3Body.path("generationConfig").path("thinkingConfig");
+        assertTrue("auto on a Gemini 3 name must send thinkingLevel", gemini3Thinking.has("thinkingLevel"));
+        assertFalse("auto on a Gemini 3 name must NOT send thinkingBudget", gemini3Thinking.has("thinkingBudget"));
+
+        // Non-Gemini-3 name -> thinkingBudget, not thinkingLevel.
+        final LlmChatRequest legacyRequest = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+        final JsonNode legacyBody = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(client.testBuildRequestBodyForModel(legacyRequest, "gemini-2.5-flash"));
+        final JsonNode legacyThinking = legacyBody.path("generationConfig").path("thinkingConfig");
+        assertTrue("auto on a non-Gemini-3 name must send thinkingBudget", legacyThinking.has("thinkingBudget"));
+        assertFalse("auto on a non-Gemini-3 name must NOT send thinkingLevel", legacyThinking.has("thinkingLevel"));
+    }
+
+    @Test
+    public void test_thinkingLevelEnabled_trueForcesThinkingLevelOnNameRuleRejectedModel() throws Exception {
+        client.setTestConfig("thinking.level.enabled", "true");
+
+        // "gemini-4-flash" is rejected by the isGemini3 name rule, but the forced override must
+        // still route it through thinkingLevel.
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+        final JsonNode body =
+                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-4-flash"));
+        final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
+        assertTrue("forced true must send thinkingLevel even on a name the rule rejects", thinking.has("thinkingLevel"));
+        assertFalse("forced true must NOT send thinkingBudget", thinking.has("thinkingBudget"));
+    }
+
+    @Test
+    public void test_thinkingLevelEnabled_falseForcesThinkingBudgetOnGemini3Model() throws Exception {
+        client.setTestConfig("thinking.level.enabled", "false");
+
+        // "gemini-3-flash" matches the isGemini3 name rule, but the forced override must still
+        // route it through the legacy integer thinkingBudget field.
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(1234);
+        final JsonNode body =
+                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-3-flash"));
+        final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
+        assertEquals(1234, thinking.path("thinkingBudget").asInt());
+        assertFalse("forced false must NOT send thinkingLevel even on a Gemini 3 name", thinking.has("thinkingLevel"));
+    }
+
+    @Test
+    public void test_thinkingHeadroomEnabled_autoFollowsNameRule() {
+        client.setTestConfig("thinking.headroom.enabled", "auto");
+
+        client.setTestModel("gemini-3-flash-preview");
+        final LlmChatRequest gemini3Request = new LlmChatRequest();
+        client.testApplyDefaultParams(gemini3Request, "intent");
+        assertEquals(Integer.valueOf(512 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), gemini3Request.getMaxTokens());
+
+        client.setTestModel("gemini-2.5-flash");
+        final LlmChatRequest legacyRequest = new LlmChatRequest();
+        client.testApplyDefaultParams(legacyRequest, "intent");
+        assertEquals(Integer.valueOf(512), legacyRequest.getMaxTokens());
+    }
+
+    @Test
+    public void test_thinkingHeadroomEnabled_trueAddsHeadroomOnNameRuleRejectedModel() {
+        client.setTestConfig("thinking.headroom.enabled", "true");
+        // "gemini-4-flash" is rejected by the isGemini3 name rule; the forced override must still
+        // add the headroom. answer's visible budget is 8192 (see applyDefaultParams).
+        client.setTestModel("gemini-4-flash");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "answer");
+        assertEquals(Integer.valueOf(8192 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_thinkingHeadroomEnabled_falseOmitsHeadroomOnGemini3Model() {
+        client.setTestConfig("thinking.headroom.enabled", "false");
+        // "gemini-3-flash" matches the isGemini3 name rule; the forced override must still omit
+        // the headroom. answer's visible budget is 8192 (see applyDefaultParams).
+        client.setTestModel("gemini-3-flash");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "answer");
+        assertEquals(Integer.valueOf(8192), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_thinkingMinimalEnabled_autoFollowsNameAndFlashRule() throws Exception {
+        client.setTestConfig("thinking.minimal.enabled", "auto");
+
+        final LlmChatRequest flashRequest = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+        final JsonNode flashBody = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(client.testBuildRequestBodyForModel(flashRequest, "gemini-3-flash"));
+        assertEquals("MINIMAL", flashBody.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
+
+        final LlmChatRequest proRequest = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+        final JsonNode proBody =
+                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(proRequest, "gemini-3-pro"));
+        assertEquals("LOW", proBody.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
+    }
+
+    @Test
+    public void test_thinkingMinimalEnabled_trueForcesMinimalIndependentOfModel() throws Exception {
+        client.setTestConfig("thinking.minimal.enabled", "true");
+
+        // "gemini-3-pro" fails the flash substring check the auto inference relies on, but the
+        // forced override must still choose MINIMAL at a non-positive budget.
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+        final JsonNode body =
+                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-3-pro"));
+        assertEquals("MINIMAL", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
+    }
+
+    @Test
+    public void test_thinkingMinimalEnabled_falseForcesLowIndependentOfModel() throws Exception {
+        client.setTestConfig("thinking.minimal.enabled", "false");
+
+        // "gemini-3-flash" passes the flash substring check the auto inference relies on, but the
+        // forced override must still choose LOW at a non-positive budget.
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+        final JsonNode body =
+                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-3-flash"));
+        assertEquals("LOW", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
+    }
+
+    @Test
+    public void test_allThreeCapabilitiesForced_readmeGatewayRouteExample() throws Exception {
+        // All three keys forced on at once, on a Gemini 3 Flash model behind a Vertex/gateway
+        // route id that the isGemini3 name rule cannot parse. Both wire effects must appear
+        // together -- the level field AND the headroom-inflated maxOutputTokens. (README documents
+        // thinking.level.enabled alone for this case, since the other two derive from it; the
+        // explicit form must keep working, and is what an operator overriding one of them writes.)
+        final String routeId = "publishers/google/models/gemini-3-flash";
+        client.setTestConfig("thinking.level.enabled", "true");
+        client.setTestConfig("thinking.minimal.enabled", "true");
+        client.setTestConfig("thinking.headroom.enabled", "true");
+        client.setTestModel(routeId);
+
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi");
+        request.setModel(routeId);
+        client.testApplyDefaultParams(request, "answer");
+
+        final JsonNode body =
+                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, routeId));
+        final JsonNode generationConfig = body.path("generationConfig");
+        assertEquals("MINIMAL", generationConfig.path("thinkingConfig").path("thinkingLevel").asText());
+        assertFalse("forced thinkingLevel must not be accompanied by thinkingBudget",
+                generationConfig.path("thinkingConfig").has("thinkingBudget"));
+        // answer's visible budget is 8192 (see applyDefaultParams).
+        assertEquals("forced headroom must inflate the answer default", 8192 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM,
+                generationConfig.path("maxOutputTokens").asInt());
+    }
+
+    // ========== chained auto derivation: thinking.level.enabled drives the other two ==========
+    // usesThinkingHeadroom and supportsMinimalThinking infer from the RESOLVED
+    // usesThinkingLevel, not from the raw isGemini3 name rule, so classifying an unrecognised id
+    // takes one key rather than three. Forcing all three is in fact the wrong advice: a Pro route
+    // id with thinking.minimal.enabled=true would be sent MINIMAL, which Pro rejects.
+
+    @Test
+    public void test_thinkingLevelEnabled_trueAloneAlsoAddsHeadroom() {
+        // Only the classification key is set. With headroom inferring from the name rule instead,
+        // "gemini-4-flash" would keep the bare visible budget and truncate.
+        client.setTestConfig("thinking.level.enabled", "true");
+        client.setTestModel("gemini-4-flash");
+        final LlmChatRequest request = new LlmChatRequest();
+        client.testApplyDefaultParams(request, "answer");
+        // answer's visible budget is 8192 (see applyDefaultParams).
+        assertEquals(Integer.valueOf(8192 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), request.getMaxTokens());
+    }
+
+    @Test
+    public void test_thinkingLevelEnabled_trueAloneSendsLowForAProRouteId() throws Exception {
+        // README's gateway example, Pro variant. The flash substring test still applies to the
+        // route id, so the chained inference declines MINIMAL on its own -- no
+        // thinking.minimal.enabled needed, and none that could wrongly force MINIMAL onto Pro.
+        client.setTestConfig("thinking.level.enabled", "true");
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(client.testBuildRequestBodyForModel(request, "publishers/google/models/gemini-3-pro"));
+        final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
+        assertEquals("LOW", thinking.path("thinkingLevel").asText());
+        assertFalse("a forced thinkingLevel must not be accompanied by thinkingBudget", thinking.has("thinkingBudget"));
+    }
+
+    @Test
+    public void test_thinkingLevelEnabled_trueAloneSendsMinimalForAFlashRouteId() throws Exception {
+        // Same single key, Flash variant of the same gateway route: MINIMAL, not LOW.
+        client.setTestConfig("thinking.level.enabled", "true");
+        final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(client.testBuildRequestBodyForModel(request, "publishers/google/models/gemini-3-flash"));
+        assertEquals("MINIMAL", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
+    }
+
+    @Test
+    public void test_thinkingLevelEnabled_trueWithBlankModelDoesNotThrow() throws Exception {
+        // The chained minimal inference calls model.toLowerCase(). The old leading term
+        // isGemini3(model) short-circuited that away for a blank id; a forced usesThinkingLevel
+        // returns true instead, so the explicit blank guard is what keeps this from NPEing.
+        client.setTestConfig("thinking.level.enabled", "true");
+        for (final String model : new String[] { null, "", "   " }) {
+            client.setTestModel(model);
+            final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
+            final JsonNode body =
+                    new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, model));
+            assertEquals("LOW", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
+
+            // applyDefaultParams resolves the same chained capabilities on the same blank id.
+            final LlmChatRequest defaults = new LlmChatRequest();
+            client.testApplyDefaultParams(defaults, "answer");
+            assertEquals(Integer.valueOf(8192 + GeminiLlmClient.GEMINI3_THINKING_HEADROOM), defaults.getMaxTokens());
+        }
     }
 
     // ========== Stream completion log diagnostics tests ==========
@@ -3199,6 +3582,22 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         private Integer testProxyPort = null;
         private String testProxyUsername = "";
         private String testProxyPassword = "";
+        private final Map<String, String> testConfigOverrides = new HashMap<>();
+
+        void setTestConfig(final String suffixKey, final String value) {
+            testConfigOverrides.put(suffixKey, value);
+        }
+
+        /**
+         * Config seam for the capability overrides. Returns the supplied default directly
+         * rather than delegating to {@code super}, so no test depends on a FessConfig
+         * component being present in the container.
+         */
+        @Override
+        protected String getConfigString(final String keySuffix, final String defaultValue) {
+            final String v = testConfigOverrides.get(keySuffix);
+            return v != null ? v : defaultValue;
+        }
 
         public void setTestRetryBaseDelayMs(final long ms) {
             this.testRetryBaseDelayMs = ms;
