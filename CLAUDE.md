@@ -4,7 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is `fess-llm-gemini`, a Fess plugin that integrates Google Gemini as an LLM backend for Fess's RAG (Retrieval-Augmented Generation) features. It implements `AbstractLlmClient` from the core Fess project.
+This is `fess-llm-gemini`, a Fess plugin that integrates Google Gemini as both an LLM backend for
+Fess's RAG (Retrieval-Augmented Generation) features and an embedding provider for content-chunk
+RAG. It implements `AbstractLlmClient` (`GeminiLlmClient`) and `AbstractEmbeddingClient`
+(`GeminiEmbeddingClient`) from the core Fess project.
 
 ## Build Commands
 
@@ -29,22 +32,50 @@ Java 21 is required.
 
 ## Architecture
 
-### Single-class plugin
-The entire plugin is one main class: `GeminiLlmClient` extends `AbstractLlmClient` (from `fess` core). It provides:
-- `chat()` - synchronous Gemini API call via `generateContent`
-- `streamChat()` - streaming via `streamGenerateContent` with manual JSON brace-depth parsing
-- `checkAvailabilityNow()` - health check via `GET /models`
-- `buildRequestBody()` - converts Fess's `LlmMessage` list to Gemini's format (system messages go to `systemInstruction`, assistant role maps to `model`)
-- `applyDefaultParams()` - sets per-prompt-type defaults (temperature, maxTokens, thinkingBudget) for: intent, evaluation, unclear, noresults, docnotfound, direct, faq, answer, summary
+### Two client classes
+The plugin has two production classes, each implementing a different core abstraction and
+reading a different config prefix through a different config channel (see
+[Configuration Properties](#configuration-properties)):
+
+- `GeminiLlmClient` extends `AbstractLlmClient` (from `fess` core), prefix `rag.llm.gemini.*`. It provides:
+  - `chat()` - synchronous Gemini API call via `generateContent`
+  - `streamChat()` - streaming via `streamGenerateContent` with manual JSON brace-depth parsing
+  - `checkAvailabilityNow()` - health check via `GET /models`
+  - `buildRequestBody()` - converts Fess's `LlmMessage` list to Gemini's format (system messages go to `systemInstruction`, assistant role maps to `model`)
+  - `applyDefaultParams()` - sets per-prompt-type defaults (temperature, maxTokens, thinkingBudget) for: intent, evaluation, unclear, noresults, docnotfound, direct, faq, answer, summary
+- `GeminiEmbeddingClient` extends `AbstractEmbeddingClient` (from `fess` core), prefix
+  `content_chunker.embedding.gemini.*`. Calls Gemini's `POST /models/{model}:batchEmbedContents`
+  endpoint for `embedDocuments()`/`embedQuery()`, splitting inputs larger than 100 texts into
+  sequential sub-batches.
 
 ### DI Configuration
-`src/main/resources/fess_llm++.xml` is a LastaDi component definition that wires `GeminiLlmClient` as a bean with all prompt templates injected via property setters. The `++` suffix means it auto-loads as a Fess plugin component.
+`src/main/resources/fess_llm++.xml` is a LastaDi component definition that wires `GeminiLlmClient` as a bean with all prompt templates injected via property setters. The `++` suffix means it auto-loads as a Fess plugin component. `GeminiEmbeddingClient` has no such XML wiring: core resolves it by component name (`geminiEmbeddingClient`) or via `EmbeddingClientManager`'s registration fallback.
 
 ### Configuration Properties
-All runtime config is read from `ComponentUtil.getFessConfig()` with prefix `rag.llm.gemini.*`.
+
+The two classes use two different config channels — they are not interchangeable:
+
+- `GeminiLlmClient`: `rag.llm.gemini.*` (and `rag.chat.*`), read via
+  `ComponentUtil.getFessConfig().getOrDefault(...)` and the inherited
+  `AbstractLlmClient#getConfigInt(...)`, both ultimately backed by `getOrDefault` —
+  `fess_config.properties` (LastaFlute `ObjectiveConfig`, loaded once at container boot).
+- `GeminiEmbeddingClient`: `content_chunker.embedding.gemini.*`, read via the inherited
+  `AbstractEmbeddingClient#getConfigString(...)` and `#getConfigInt(...)`, both ultimately backed
+  by `ComponentUtil.getFessConfig().getSystemProperty(...)` — `conf/system.properties` (or
+  `-Dfess.system.<key>`), visible under System Info > Config Info > App Properties (secret values
+  such as `api.key` are masked there). This matches how Fess core routes every
+  `content_chunker.*` key. Most properties are re-read live on every call; `timeout` and
+  `availability.check.interval` are the exceptions — both are consumed exactly once, in
+  `AbstractEmbeddingClient#init()` / `#startAvailabilityCheck()` (`GeminiEmbeddingClient` does not
+  override `init()`), so changing either requires a restart.
+
+A value for a `content_chunker.embedding.gemini.*` key placed in `fess_config.properties` (or a
+`rag.llm.gemini.*` key placed in `conf/system.properties`) is silently ignored.
 
 ### Test Infrastructure
-Tests use `UnitFessTestCase` (extends `WebContainerTestCase` from utflute-lastaflute) with `test_app.xml` for DI container setup. HTTP calls are mocked via OkHttp's `MockWebServer`. The test class creates a `TestableGeminiLlmClient` inner subclass that overrides config methods to point at the mock server.
+Tests use `UnitFessTestCase` (extends `WebContainerTestCase` from utflute-lastaflute) with `test_app.xml` for DI container setup. HTTP calls are mocked via OkHttp's `MockWebServer`. `GeminiLlmClientTest` creates a `TestableGeminiLlmClient` inner subclass that overrides config methods to point at the mock server; `GeminiEmbeddingClientTest` does the same with `TestableGeminiEmbeddingClient`.
+
+A second seam covers the real (non-overridden) config-read methods on `GeminiEmbeddingClient`: `GeminiEmbeddingClientConfigChannelTest`, plus several `test_get*_notConfigured`/`test_getDimension_*`/`test_getRetryBaseDelayMs_nonNumericValue_returnsDefault` methods in `GeminiEmbeddingClientTest`, construct a plain `new GeminiEmbeddingClient()` (no subclass) and inject values directly into the `systemProperties` component via `ComponentUtil.getSystemProperties().setProperty(...)`/`.remove(...)`, restoring in a `finally` block. That component is a JVM-lifetime singleton shared across test classes (registered as `org.codelibs.fess.unit.TestSystemProperties` in `test_app.xml`), so both test classes override `isUseOneTimeContainer()` to get a fresh container per test method instead of relying on `finally`-only cleanup.
 
 ### Logging keys
 
