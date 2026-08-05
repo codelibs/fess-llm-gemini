@@ -22,9 +22,13 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
@@ -36,6 +40,7 @@ import org.apache.hc.core5.http.io.entity.StringEntity;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
+import org.codelibs.fess.Constants;
 import org.codelibs.fess.gemini.GeminiApiUrl;
 import org.codelibs.fess.llm.AbstractLlmClient;
 import org.codelibs.fess.llm.LlmChatRequest;
@@ -69,6 +74,20 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     /** Configuration property holding the API endpoint; named in the URL-rejection message. */
     private static final String API_URL_CONFIG_KEY = "rag.llm.gemini.api.url";
+
+    /** Config key suffix forcing {@link #usesThinkingLevel(String)}. */
+    private static final String CONFIG_THINKING_LEVEL_ENABLED = "thinking.level.enabled";
+    /** Config key suffix forcing {@link #supportsMinimalThinking(String)}. */
+    private static final String CONFIG_THINKING_MINIMAL_ENABLED = "thinking.minimal.enabled";
+    /** Config key suffix forcing {@link #usesThinkingHeadroom(String)}. */
+    private static final String CONFIG_THINKING_HEADROOM_ENABLED = "thinking.headroom.enabled";
+
+    /**
+     * Capability keys already reported as carrying an unrecognized value, held as
+     * {@code <keySuffix>=<value>} tokens. The capability predicates run on every request, so a
+     * single misconfiguration would otherwise WARN on every call for as long as it lasts.
+     */
+    private final Set<String> warnedCapabilityValues = ConcurrentHashMap.newKeySet();
 
     /**
      * Summary of a single streamChat invocation. Exposed for diagnostics, not part of the LLM SPI.
@@ -682,7 +701,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
         if (request.getThinkingBudget() != null) {
             final Map<String, Object> thinkingConfig = new HashMap<>();
             final String model = getModelName(request);
-            if (isGemini3(model)) {
+            if (usesThinkingLevel(model)) {
                 thinkingConfig.put("thinkingLevel", budgetToThinkingLevel(request.getThinkingBudget(), model));
             } else {
                 thinkingConfig.put("thinkingBudget", request.getThinkingBudget());
@@ -839,31 +858,33 @@ public class GeminiLlmClient extends AbstractLlmClient {
 
     /**
      * Resolves the default {@code maxOutputTokens} for a prompt type, adding
-     * {@link #GEMINI3_THINKING_HEADROOM} when the resolved model is a Gemini 3.x model
-     * so the mandatory thinking spend does not eat into the visible-output budget.
+     * {@link #GEMINI3_THINKING_HEADROOM} when the caller has determined the resolved model
+     * needs it (see {@link #usesThinkingHeadroom(String)}) so the mandatory thinking spend
+     * does not eat into the visible-output budget.
      *
      * @param visibleTokens the budget required for the actual visible response.
-     * @param gemini3 {@code true} when the active model is Gemini 3.x.
+     * @param addHeadroom {@code true} when {@link #GEMINI3_THINKING_HEADROOM} should be added.
      * @return the resolved default {@code maxOutputTokens}.
      */
-    static int defaultMaxTokens(final int visibleTokens, final boolean gemini3) {
-        return gemini3 ? visibleTokens + GEMINI3_THINKING_HEADROOM : visibleTokens;
+    static int defaultMaxTokens(final int visibleTokens, final boolean addHeadroom) {
+        return addHeadroom ? visibleTokens + GEMINI3_THINKING_HEADROOM : visibleTokens;
     }
 
     /**
      * Applies default generation parameters for the Gemini API free tier.
      * Only sets defaults when user has not configured the parameter.
      *
-     * <p>The {@code maxOutputTokens} default is model-aware: for Gemini 3.x models the
-     * mandatory thinking token spend (even at the lowest {@code thinkingLevel} bucket) is
-     * added on top of each prompt type's visible-output budget so responses do not get
-     * truncated with {@code finishReason=MAX_TOKENS}. Gemini 2.x defaults are unchanged.
+     * <p>The {@code maxOutputTokens} default is headroom-aware: when {@link #usesThinkingHeadroom(String)}
+     * says the resolved model needs it, the mandatory thinking token spend (even at the lowest
+     * {@code thinkingLevel} bucket) is added on top of each prompt type's visible-output budget
+     * so responses do not get truncated with {@code finishReason=MAX_TOKENS}. Otherwise defaults
+     * are unchanged.
      *
      * @param request the LLM chat request
      * @param promptType the prompt type (e.g. "intent", "evaluation", "answer")
      */
     protected void applyDefaultParams(final LlmChatRequest request, final String promptType) {
-        final boolean gemini3 = isGemini3(getModelName(request));
+        final boolean usesHeadroom = usesThinkingHeadroom(getModelName(request));
         switch (promptType) {
         case "intent":
             if (request.getTemperature() == null) {
@@ -873,7 +894,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 // Intent JSON includes a query string with Fess query syntax plus a
                 // reasoning field; in non-English locales (e.g. Japanese) reasoning
                 // tokens can easily push the visible output above 256.
-                request.setMaxTokens(defaultMaxTokens(512, gemini3));
+                request.setMaxTokens(defaultMaxTokens(512, usesHeadroom));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -885,7 +906,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
             }
             if (request.getMaxTokens() == null) {
                 // Tiny JSON: {"relevant_indexes":[..],"has_relevant":bool}
-                request.setMaxTokens(defaultMaxTokens(256, gemini3));
+                request.setMaxTokens(defaultMaxTokens(256, usesHeadroom));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -897,7 +918,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.7);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(defaultMaxTokens(512, gemini3));
+                request.setMaxTokens(defaultMaxTokens(512, usesHeadroom));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -911,7 +932,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 // Polite multi-bullet message that re-prints the requested URL; sized
                 // to match unclear/noresults so non-English (e.g. Japanese) responses
                 // do not truncate.
-                request.setMaxTokens(defaultMaxTokens(512, gemini3));
+                request.setMaxTokens(defaultMaxTokens(512, usesHeadroom));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -923,7 +944,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.7);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(defaultMaxTokens(2048, gemini3));
+                request.setMaxTokens(defaultMaxTokens(2048, usesHeadroom));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -934,7 +955,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.5);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(defaultMaxTokens(8192, gemini3));
+                request.setMaxTokens(defaultMaxTokens(8192, usesHeadroom));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -945,7 +966,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.3);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(defaultMaxTokens(4096, gemini3));
+                request.setMaxTokens(defaultMaxTokens(4096, usesHeadroom));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -956,7 +977,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                 request.setTemperature(0.3);
             }
             if (request.getMaxTokens() == null) {
-                request.setMaxTokens(defaultMaxTokens(256, gemini3));
+                request.setMaxTokens(defaultMaxTokens(256, usesHeadroom));
             }
             if (request.getThinkingBudget() == null) {
                 request.setThinkingBudget(0);
@@ -1116,19 +1137,70 @@ public class GeminiLlmClient extends AbstractLlmClient {
     }
 
     /**
-     * Detects whether a model id refers to the Gemini 3 generation, which uses
+     * The model-name rule behind the configurable {@code thinking.*.enabled} capability
+     * predicates: it is the {@code auto} inference of {@link #usesThinkingLevel(String)}, which
+     * {@link #usesThinkingHeadroom(String)} and {@link #supportsMinimalThinking(String)} in turn
+     * chain to. It detects whether a model id refers to the Gemini 3 generation, which uses
      * {@code thinkingLevel} (MINIMAL/LOW/MEDIUM/HIGH) instead of the integer
-     * {@code thinkingBudget} accepted by Gemini 2.x. Note that {@code MINIMAL} is only
-     * supported on a subset of Gemini 3 models — see {@link #supportsMinimalThinking}.
+     * {@code thinkingBudget} accepted by Gemini 2.x. Note that {@code MINIMAL} is only supported
+     * on a subset of Gemini 3 models — see {@link #supportsMinimalThinking}.
+     *
+     * <p>Kept a pure, config-free static so it stays testable independently of the overrides
+     * that can replace it. An id this rule does not recognise (a future {@code gemini-4}, a
+     * Vertex/gateway route id) falls through to the Gemini 2.x branch — the configurable
+     * predicates exist precisely so that misclassification can be corrected explicitly.
+     * Case-insensitive, so a differently-cased id such as {@code "GEMINI-3-FLASH"} still
+     * classifies correctly.
      *
      * @param model the model id, for example {@code "gemini-3-flash"} or {@code "gemini-3.1-pro"}.
-     * @return {@code true} when the id starts with {@code "gemini-3"}; {@code false} when {@code null} or any other generation.
+     * @return {@code true} when the id starts with {@code "gemini-3-"} or {@code "gemini-3."}, or
+     *         equals {@code "gemini-3"} (case-insensitively); {@code false} when blank or any
+     *         other generation.
      */
     static boolean isGemini3(final String model) {
-        if (model == null) {
+        if (StringUtil.isBlank(model)) {
             return false;
         }
-        return model.startsWith("gemini-3-") || model.startsWith("gemini-3.") || "gemini-3".equals(model);
+        return model.regionMatches(true, 0, "gemini-3-", 0, "gemini-3-".length())
+                || model.regionMatches(true, 0, "gemini-3.", 0, "gemini-3.".length()) || "gemini-3".equalsIgnoreCase(model);
+    }
+
+    /**
+     * Determines whether the given model must send the string {@code thinkingLevel} thinking-config
+     * field instead of the integer {@code thinkingBudget} field used by Gemini 2.x.
+     *
+     * <p>Defaults to {@link #isGemini3(String)}, a prefix match on Gemini's own model names, which
+     * says nothing about a model served through a Gemini-protocol gateway or a Vertex-style route
+     * id (e.g. {@code publishers/google/models/gemini-3-flash}). Set
+     * {@code rag.llm.gemini.thinking.level.enabled} to {@code true} or {@code false} to classify
+     * such a model explicitly.
+     *
+     * @param model the model id.
+     * @return {@code true} when {@code thinkingLevel} must be sent instead of {@code thinkingBudget}.
+     */
+    protected boolean usesThinkingLevel(final String model) {
+        return resolveCapability(CONFIG_THINKING_LEVEL_ENABLED, () -> isGemini3(model));
+    }
+
+    /**
+     * Determines whether {@link #defaultMaxTokens(int, boolean)} should add
+     * {@link #GEMINI3_THINKING_HEADROOM} on top of a prompt type's visible-output budget for the
+     * given model, because the model always spends some tokens on thinking even at its lowest
+     * {@code thinkingLevel} bucket.
+     *
+     * <p>Defaults ({@code auto}) to the <em>resolved</em> {@link #usesThinkingLevel(String)}, not to
+     * the raw {@link #isGemini3(String)} name rule: a model that sends {@code thinkingLevel} always
+     * spends thinking tokens, so classifying an unrecognised id with
+     * {@code rag.llm.gemini.thinking.level.enabled} alone also gives it the headroom it needs. With
+     * every key unset the two are identical, because {@code usesThinkingLevel} then <em>is</em>
+     * {@code isGemini3}. Set {@code rag.llm.gemini.thinking.headroom.enabled} to {@code true} or
+     * {@code false} to decide the headroom independently of the wire format.
+     *
+     * @param model the model id.
+     * @return {@code true} when {@link #GEMINI3_THINKING_HEADROOM} should be added.
+     */
+    protected boolean usesThinkingHeadroom(final String model) {
+        return resolveCapability(CONFIG_THINKING_HEADROOM_ENABLED, () -> usesThinkingLevel(model));
     }
 
     /**
@@ -1137,11 +1209,28 @@ public class GeminiLlmClient extends AbstractLlmClient {
      * Gemini 3.1 Flash-Lite (any Gemini 3 id whose name contains {@code "flash"}), but is
      * NOT supported by Gemini 3 Pro / Gemini 3.1 Pro.
      *
+     * <p>Defaults ({@code auto}) to the <em>resolved</em> {@link #usesThinkingLevel(String)} plus the
+     * id containing {@code "flash"}, both matched case-insensitively so a differently-cased id such
+     * as {@code "GEMINI-3-FLASH"} classifies the same as its lowercase form. Chaining to the
+     * resolved sibling rather than to the raw {@link #isGemini3(String)} name rule means forcing
+     * {@code rag.llm.gemini.thinking.level.enabled} on an unrecognised id still picks the right
+     * level for it: {@code MINIMAL} for a route id naming a Flash model, {@code LOW} for a Pro one,
+     * which is what Pro accepts. With every key unset this is identical to the old
+     * {@code isGemini3}-based inference, because {@code usesThinkingLevel} then <em>is</em>
+     * {@code isGemini3}. The capability still keeps its own key because it names a distinct wire
+     * effect — which level string is sent at a non-positive budget, as opposed to which thinking
+     * field is sent at all: set {@code rag.llm.gemini.thinking.minimal.enabled} to {@code true} or
+     * {@code false} to force the level explicitly regardless of model name.
+     *
      * @param model the model id, e.g. {@code "gemini-3-flash"}, {@code "gemini-3.1-flash-lite-preview"}, {@code "gemini-3.1-pro"}.
-     * @return {@code true} when the id is a Gemini 3 model that supports {@code MINIMAL}.
+     * @return {@code true} when the id is (or is configured as) a model that supports {@code MINIMAL}.
      */
-    static boolean supportsMinimalThinking(final String model) {
-        return isGemini3(model) && model.contains("flash");
+    protected boolean supportsMinimalThinking(final String model) {
+        // StringUtil.isNotBlank is load-bearing, not decoration: usesThinkingLevel can return true
+        // for a blank/null model when the key is forced, so it no longer shields toLowerCase the
+        // way the old isGemini3(model) leading term did.
+        return resolveCapability(CONFIG_THINKING_MINIMAL_ENABLED,
+                () -> usesThinkingLevel(model) && StringUtil.isNotBlank(model) && model.toLowerCase(Locale.ROOT).contains("flash"));
     }
 
     /**
@@ -1157,7 +1246,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
      * @param model the resolved model id, used to decide whether {@code MINIMAL} is supported.
      * @return one of {@code "MINIMAL"}, {@code "LOW"}, {@code "MEDIUM"}, {@code "HIGH"}.
      */
-    static String budgetToThinkingLevel(final int budget, final String model) {
+    protected String budgetToThinkingLevel(final int budget, final String model) {
         if (budget <= 0) {
             return supportsMinimalThinking(model) ? "MINIMAL" : "LOW";
         }
@@ -1165,6 +1254,87 @@ public class GeminiLlmClient extends AbstractLlmClient {
             return "MEDIUM";
         }
         return "HIGH";
+    }
+
+    /**
+     * Reads a String configuration value under this client's config prefix.
+     *
+     * <p>Uses {@code getOrDefault}, i.e. {@code fess_config.properties} plus the
+     * {@code -Dfess.config.*} JVM override - the same channel as every other
+     * {@code rag.llm.gemini.*} property, including {@code rag.llm.gemini.model} and
+     * {@code api.url}. This deliberately does <em>not</em> call
+     * {@code AbstractEmbeddingClient#getConfigString}, which reads {@code conf/system.properties}
+     * - a different store. The two must not be "deduplicated" into one another: delegating this
+     * method to that one would make every {@code rag.llm.gemini.*} value in
+     * {@code fess_config.properties} stop being read, silently.
+     *
+     * @param keySuffix the key suffix appended to {@link #getConfigPrefix()} and a dot.
+     * @param defaultValue the value to return when the key is absent.
+     * @return the configured value, or {@code defaultValue} when the key is absent.
+     */
+    protected String getConfigString(final String keySuffix, final String defaultValue) {
+        return ComponentUtil.getFessConfig().getOrDefault(getConfigPrefix() + "." + keySuffix, defaultValue);
+    }
+
+    /**
+     * Resolves an {@code auto} / {@code true} / {@code false} capability override.
+     *
+     * <p>{@code auto} - the default - means "infer from the model name", which is what
+     * {@link #isGemini3(String)} and the predicates built on it do unconditionally on their own.
+     * An explicit {@code true} or {@code false} forces the capability whatever the model is
+     * called, which is what a Gemini-protocol gateway or a Vertex-style route id needs: such an
+     * id carries no Gemini generation semantics, so prefix matching cannot classify it.
+     *
+     * <p>The value is trimmed defensively rather than out of necessity: the config channel this
+     * reads already trims. {@code FessConfigImpl}'s property lookup ends in
+     * {@code filterPropertyAsDefault}, i.e. LastaFlute's {@code filterPropertyTrimming} ->
+     * {@code String.trim()}, and the {@code -Dfess.config.*} JVM override is consulted inside the
+     * cache lookup upstream of it, so both channels arrive trimmed. Keeping the {@code trim()}
+     * here means the parsing does not silently depend on that. A blank value is treated as
+     * {@code auto} in silence - {@code key=} in a properties file reads as "left in place but
+     * unset". Any other unrecognized value degrades to {@code auto} rather than to {@code false},
+     * so a typo cannot silently switch a capability off, and is reported once per distinct
+     * key/value pair - these predicates run on every request, so an undeduplicated WARN would
+     * flood the log for as long as the misconfiguration lasts.
+     *
+     * @param keySuffix the capability key suffix under {@link #getConfigPrefix()}.
+     * @return {@link Boolean#TRUE} or {@link Boolean#FALSE} when the capability is forced,
+     *         {@code null} when the caller should infer it from the model name.
+     */
+    protected Boolean getCapabilityOverride(final String keySuffix) {
+        final String rawValue = getConfigString(keySuffix, Constants.AUTO);
+        // Defensive only: getOrDefault already returns a trimmed value (FessConfigImpl ->
+        // filterPropertyAsDefault -> String.trim()), for both fess_config.properties and
+        // -Dfess.config.*. This keeps the parsing self-contained rather than channel-dependent.
+        final String value = rawValue == null ? StringUtil.EMPTY : rawValue.trim();
+        if (Constants.TRUE.equalsIgnoreCase(value)) {
+            return Boolean.TRUE;
+        }
+        if (Constants.FALSE.equalsIgnoreCase(value)) {
+            return Boolean.FALSE;
+        }
+        if (StringUtil.isBlank(value) || Constants.AUTO.equalsIgnoreCase(value)) {
+            return null;
+        }
+        if (warnedCapabilityValues.add(keySuffix + "=" + value)) {
+            logger.warn("[LLM:GEMINI] Invalid {}.{} value: {}. Using {}.", getConfigPrefix(), keySuffix, value, Constants.AUTO);
+        }
+        return null;
+    }
+
+    /**
+     * Resolves a capability from its override property, falling back to a model-name inference.
+     *
+     * <p>The inference is a supplier rather than a value so it is not evaluated when an explicit
+     * {@code true} / {@code false} already decides the answer.
+     *
+     * @param keySuffix the capability key suffix under {@link #getConfigPrefix()}.
+     * @param inference the model-name rule to apply when the property is on {@code auto}.
+     * @return the resolved capability.
+     */
+    private boolean resolveCapability(final String keySuffix, final BooleanSupplier inference) {
+        final Boolean override = getCapabilityOverride(keySuffix);
+        return override != null ? override.booleanValue() : inference.getAsBoolean();
     }
 
     /**
