@@ -122,6 +122,15 @@ dimension, also a `conf/system.properties` value) to be set, independent of this
 `GeminiLlmClient`, the API key is sent via the `x-goog-api-key` HTTP request header, not appended
 to the URL.
 
+#### Query normalization
+
+`embedQuery()` strips Fess/Lucene query syntax — `+required` terms, `(a OR b)` groups,
+`title:"x"^2` field boosts, quoted phrases — before embedding, because on the RAG path the string
+it receives is a Fess query built by the LLM's intent step and those operators are markup rather
+than words. This is separate from `task_type`, which still distinguishes the two calls at the API
+level. `embedDocuments()` strips nothing: document text is prose whose punctuation is content.
+A query left empty by the removals is embedded unchanged.
+
 #### Batch size and token quotas
 
 `embedDocuments` / `embedQuery` split their input into sequential sub-batches of at most 100
