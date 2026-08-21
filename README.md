@@ -151,6 +151,14 @@ Lowering `content_chunker.job.bulk_size` does not help on its own: it bounds how
 
 The plugin authenticates by sending the API key as the `x-goog-api-key` HTTP request header (Google's recommended method). Keys are never appended to the URL as `?key=…`, so they do not appear in URL access logs.
 
+> **Debug logging and the API key.** Raising the log level from Admin > General (either **Log
+> Level** or **LLM Log Level**) does not log the key — the plugin's own DEBUG output, including
+> the `[LLM:GEMINI] requestBody=` lines, never contains it. Starting Fess with
+> `FESS_LOG_LEVEL=debug` does: that raises the *root* logger, which turns on Apache HttpClient's
+> own request-header and wire logging, and `x-goog-api-key` is then written to `logs/fess.log`
+> (and `logs/fess-chunk.log`, for the embedding client) in cleartext. Prefer the admin settings;
+> if you do run whole-system debug, treat those logs as holding a live credential.
+
 ### Extended Thinking
 
 The plugin automatically translates a single request-level `thinkingBudget` (integer token allowance) to whatever shape the resolved model expects:
