@@ -46,7 +46,41 @@ reading a different config prefix through a different config channel (see
 - `GeminiEmbeddingClient` extends `AbstractEmbeddingClient` (from `fess` core), prefix
   `content_chunker.embedding.gemini.*`. Calls Gemini's `POST /models/{model}:batchEmbedContents`
   endpoint for `embedDocuments()`/`embedQuery()`, splitting inputs larger than 100 texts into
-  sequential sub-batches.
+  sequential sub-batches. `embedQuery()` additionally runs its texts through `toPlainQuery()`,
+  which removes Fess/Lucene query syntax; `embedDocuments()` sends text verbatim. This is a
+  separate axis from `task_type` — see "Query normalization" in `README.md`, and
+  [Query normalization](#query-normalization) below for why it is safe.
+
+### Query normalization
+
+`GeminiEmbeddingClient#toPlainQuery` removes Fess/Lucene query syntax from the texts
+`embedQuery()` sends: a leading `+`/`-`, `field:` prefixes, `^2`/`~1` markers, `"()[]{}*?\`,
+`&&`/`||`, and the `AND`/`OR`/`NOT`/`TO` keywords, then collapses the whitespace left behind.
+
+The reason is that on the RAG path the string is not typed by a user. Core embeds the query the
+LLM's intent step produced, and this plugin's own `intentDetectionPrompt` in `fess_llm++.xml`
+instructs that step to emit exactly this syntax (`use + prefix`, `OR grouping`, quotation marks,
+`title:"term"^2`). Embedded verbatim, the operators become terms in the vector, and the chunks
+chosen for the answer prompt are ranked against that vector.
+
+**Why the blast radius is bounded.** In fess 15.8.0 exactly two call sites reach `embedQuery`:
+
+- `SemanticChunkSearcher#search` calls it only after its own `isPlainQuery(query)` returned true.
+  Everything `toPlainQuery` removes is something `SemanticChunkSearcher.QUERY_SYNTAX_PATTERN`
+  already rejects, so for this caller the method is the **identity** and the semantic branch
+  embeds byte-for-byte what it embedded before. `toPlainQuery` returns the original instance
+  when nothing matched, so this is exact rather than approximate.
+- `DefaultChatContentFetcher#resolveQueryVector` calls it with whatever the intent step produced.
+  This is the only call site whose behaviour changes, and it is the one that needs it.
+
+A query made only of operators would normalize to the empty string; Gemini rejects a blank
+`parts[].text`, so the original is embedded instead — degrading to the previous behaviour beats
+failing the chat. `GeminiEmbeddingClientQueryTest` pins both the identity invariant and this
+fallback.
+
+The sibling `fess-llm-openai` carries the same normalization (its PR #25); `embedDocuments()`
+in both plugins deliberately does not, because document text is prose whose punctuation is
+content.
 
 ### DI Configuration
 `src/main/resources/fess_llm++.xml` is a LastaDi component definition that wires `GeminiLlmClient` as a bean with all prompt templates injected via property setters. The `++` suffix means it auto-loads as a Fess plugin component. `GeminiEmbeddingClient` has no such XML wiring: core resolves it by component name (`geminiEmbeddingClient`) or via `EmbeddingClientManager`'s registration fallback.

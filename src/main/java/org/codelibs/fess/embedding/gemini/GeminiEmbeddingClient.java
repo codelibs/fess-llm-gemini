@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.classic.methods.HttpPost;
@@ -63,6 +64,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * parameter, analogous to how {@code OllamaEmbeddingClient} applies a
  * {@code search_document: }/{@code search_query: } text prefix for the same
  * document-vs-query distinction.
+ *
+ * <p>The two also differ in the text they send, which is separate from {@code taskType}:
+ * a query reaching {@link #embedQuery(List)} on the RAG path is a Fess query string built
+ * by the LLM's intent step, so its query syntax is stripped first (see
+ * {@link #toPlainQuery(String)}). Document text is embedded exactly as given.
  *
  * @see <a href="https://ai.google.dev/gemini-api/docs/embeddings">Gemini Embeddings API</a>
  */
@@ -130,6 +136,36 @@ public class GeminiEmbeddingClient extends AbstractEmbeddingClient {
      * identically for a single document whose chunk count exceeds this cap).
      */
     static final int MAX_BATCH_SIZE = 100;
+
+    /**
+     * A {@code +} or {@code -} that begins a term. Mid-token both are ordinary characters
+     * ({@code gemini-embedding-001}, {@code C++}), so the match is anchored to the start
+     * of the string or to whitespace and the whitespace itself is preserved.
+     */
+    private static final Pattern QUERY_TERM_PREFIX = Pattern.compile("(^|\\s)[+\\-](?=\\S)");
+
+    /**
+     * A field restriction such as {@code title:}. The field name is a schema name rather than
+     * something the user asked about, so it is removed with its colon instead of being left
+     * behind as a term. Deliberately ASCII-only ({@code \w}), which is what Fess field names are.
+     */
+    private static final Pattern QUERY_FIELD_PREFIX = Pattern.compile("\\b\\w+:");
+
+    /**
+     * A boost ({@code ^2}) or fuzzy/proximity ({@code ~1}) marker together with its number.
+     * Removed as a unit: dropping only the {@code ^} of {@code "Fess"^2} would glue the boost
+     * factor onto the term and embed {@code Fess2}.
+     */
+    private static final Pattern QUERY_BOOST_OR_FUZZY = Pattern.compile("[\\^~]\\d*(?:\\.\\d+)?");
+
+    /** Grouping, phrase, range and wildcard markup, plus the two-character boolean operators. */
+    private static final Pattern QUERY_SYNTAX_CHARS = Pattern.compile("[\"()\\[\\]{}*?\\\\]|&&|\\|\\|");
+
+    /** Boolean and range keywords, which Lucene reads as operators rather than as terms. */
+    private static final Pattern QUERY_KEYWORDS = Pattern.compile("\\b(?:AND|OR|NOT|TO)\\b");
+
+    /** Collapses the gaps left where markup was removed. */
+    private static final Pattern WHITESPACE_RUN = Pattern.compile("\\s+");
 
     /**
      * Whether the userinfo-bearing {@code api.url} has already been reported. The availability
@@ -201,9 +237,75 @@ public class GeminiEmbeddingClient extends AbstractEmbeddingClient {
         return callEmbedApi("embedDocuments", texts, getDocumentTaskType());
     }
 
+    /**
+     * Generates embedding vectors for the given query texts, with Fess/Lucene query syntax
+     * removed first (see {@link #toPlainQuery(String)}).
+     *
+     * <p>The request differs from {@link #embedDocuments(List)} in its {@code taskType}, and the
+     * text differs too: a query arriving here on the RAG path is a Fess query string assembled by
+     * the intent step, and its operators are markup rather than words.
+     *
+     * @param texts the query texts to embed, in order
+     * @return the list of vectors, one per input text, in the same order
+     * @throws EmbeddingException if the provider call fails or returns an unusable response
+     */
     @Override
     public List<float[]> embedQuery(final List<String> texts) {
-        return callEmbedApi("embedQuery", texts, getQueryTaskType());
+        if (texts == null || texts.isEmpty()) {
+            return callEmbedApi("embedQuery", texts, getQueryTaskType());
+        }
+        final List<String> plainTexts = new ArrayList<>(texts.size());
+        for (final String text : texts) {
+            final String plain = toPlainQuery(text);
+            if (logger.isDebugEnabled() && plain != null && !plain.equals(text)) {
+                logger.debug("[Embedding:GEMINI] Removed query syntax before embedding. from={}, to={}", text, plain);
+            }
+            plainTexts.add(plain);
+        }
+        return callEmbedApi("embedQuery", plainTexts, getQueryTaskType());
+    }
+
+    /**
+     * Removes Fess/Lucene query syntax so what gets embedded is the terms the user asked about.
+     *
+     * <p>On the RAG path fess core embeds the query the LLM's intent step produced, and this
+     * plugin's own {@code intentDetectionPrompt} instructs that step to emit Fess syntax
+     * ({@code +required}, {@code (a OR b)}, {@code title:"x"^2}, quoted phrases). Those
+     * operators are not words: embedded verbatim they are noise in the vector, and the chunks
+     * chosen for the answer prompt are ranked against that vector.
+     *
+     * <p><b>Scope.</b> In fess 15.8.0 exactly two call sites reach {@code embedQuery}.
+     * {@code SemanticChunkSearcher#search} calls it only after its own {@code isPlainQuery()}
+     * returned true, and every construct removed here is one that
+     * {@code SemanticChunkSearcher.QUERY_SYNTAX_PATTERN} already rejects - so for that call site
+     * this method is the identity and the semantic branch embeds exactly what it embedded
+     * before. The behaviour therefore changes only on the other call site,
+     * {@code DefaultChatContentFetcher#resolveQueryVector}, which is the one that needs it.
+     *
+     * <p>A string that survives unchanged is returned as-is, whitespace included, so the
+     * identity above is exact rather than approximate. A string left empty by the removals -
+     * a query made only of operators - falls back to the original, because a blank input is
+     * rejected by the API and degrading to the previous behaviour beats failing the chat.
+     *
+     * @param text the query text, may be null
+     * @return the text with query syntax removed, or the original text if nothing was removed
+     *         or nothing would remain
+     */
+    protected String toPlainQuery(final String text) {
+        if (StringUtil.isBlank(text)) {
+            return text;
+        }
+        String work = QUERY_TERM_PREFIX.matcher(text).replaceAll("$1");
+        work = QUERY_FIELD_PREFIX.matcher(work).replaceAll(StringUtil.EMPTY);
+        work = QUERY_BOOST_OR_FUZZY.matcher(work).replaceAll(StringUtil.EMPTY);
+        // Replaced with a space, not with nothing: "(a)(b)" must not become the single term "ab".
+        work = QUERY_SYNTAX_CHARS.matcher(work).replaceAll(" ");
+        work = QUERY_KEYWORDS.matcher(work).replaceAll(StringUtil.EMPTY);
+        if (work.equals(text)) {
+            return text;
+        }
+        final String plain = WHITESPACE_RUN.matcher(work).replaceAll(" ").trim();
+        return plain.isEmpty() ? text : plain;
     }
 
     /**
