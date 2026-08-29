@@ -43,7 +43,7 @@ import org.codelibs.fess.unit.UnitFessTestCase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -2220,7 +2220,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(1024).setThinkingBudget(0);
         // Gemini 3 Flash supports MINIMAL — thinkingBudget=0 should map to it for lowest cost/latency.
         final String json = client.testBuildRequestBodyForModel(request, "gemini-3-flash");
-        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        final JsonNode body = new tools.jackson.databind.ObjectMapper().readTree(json);
         final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
         assertFalse("thinkingBudget MUST NOT be sent to Gemini 3", thinking.has("thinkingBudget"));
         assertEquals("MINIMAL", thinking.path("thinkingLevel").asText());
@@ -2232,7 +2232,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(1024).setThinkingBudget(0);
         // The default model gemini-3.1-flash-lite-preview also supports MINIMAL.
         final String json = client.testBuildRequestBodyForModel(request, "gemini-3.1-flash-lite-preview");
-        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        final JsonNode body = new tools.jackson.databind.ObjectMapper().readTree(json);
         assertEquals("MINIMAL", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
     }
 
@@ -2242,7 +2242,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(1024).setThinkingBudget(0);
         // Gemini 3 Pro / 3.1 Pro do NOT support MINIMAL — thinkingBudget=0 falls back to LOW.
         final String json = client.testBuildRequestBodyForModel(request, "gemini-3.1-pro");
-        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        final JsonNode body = new tools.jackson.databind.ObjectMapper().readTree(json);
         final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
         assertFalse("thinkingBudget MUST NOT be sent to Gemini 3", thinking.has("thinkingBudget"));
         assertEquals("LOW", thinking.path("thinkingLevel").asText());
@@ -2253,7 +2253,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         setupClientForMockServer();
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(2048).setThinkingBudget(2048);
         final String json = client.testBuildRequestBodyForModel(request, "gemini-3-pro");
-        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        final JsonNode body = new tools.jackson.databind.ObjectMapper().readTree(json);
         assertEquals("MEDIUM", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
     }
 
@@ -2262,7 +2262,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         setupClientForMockServer();
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(8192).setThinkingBudget(8192);
         final String json = client.testBuildRequestBodyForModel(request, "gemini-3.1-pro");
-        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        final JsonNode body = new tools.jackson.databind.ObjectMapper().readTree(json);
         assertEquals("HIGH", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
     }
 
@@ -2271,7 +2271,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         setupClientForMockServer();
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setMaxTokens(8192).setThinkingBudget(2048);
         final String json = client.testBuildRequestBodyForModel(request, "gemini-2.5-flash");
-        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+        final JsonNode body = new tools.jackson.databind.ObjectMapper().readTree(json);
         final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
         assertEquals(2048, thinking.path("thinkingBudget").asInt());
         assertFalse("thinkingLevel MUST NOT be sent to Gemini 2.x", thinking.has("thinkingLevel"));
@@ -2357,7 +2357,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         // ...and the resulting wire level at a non-positive budget, not just the predicate.
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
         final JsonNode body =
-                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "GEMINI-3-FLASH"));
+                new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "GEMINI-3-FLASH"));
         assertEquals("MINIMAL", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
     }
 
@@ -2507,16 +2507,16 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
 
         // Gemini 3 name -> thinkingLevel, not thinkingBudget.
         final LlmChatRequest gemini3Request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
-        final JsonNode gemini3Body = new com.fasterxml.jackson.databind.ObjectMapper()
-                .readTree(client.testBuildRequestBodyForModel(gemini3Request, "gemini-3-flash"));
+        final JsonNode gemini3Body =
+                new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(gemini3Request, "gemini-3-flash"));
         final JsonNode gemini3Thinking = gemini3Body.path("generationConfig").path("thinkingConfig");
         assertTrue("auto on a Gemini 3 name must send thinkingLevel", gemini3Thinking.has("thinkingLevel"));
         assertFalse("auto on a Gemini 3 name must NOT send thinkingBudget", gemini3Thinking.has("thinkingBudget"));
 
         // Non-Gemini-3 name -> thinkingBudget, not thinkingLevel.
         final LlmChatRequest legacyRequest = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
-        final JsonNode legacyBody = new com.fasterxml.jackson.databind.ObjectMapper()
-                .readTree(client.testBuildRequestBodyForModel(legacyRequest, "gemini-2.5-flash"));
+        final JsonNode legacyBody =
+                new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(legacyRequest, "gemini-2.5-flash"));
         final JsonNode legacyThinking = legacyBody.path("generationConfig").path("thinkingConfig");
         assertTrue("auto on a non-Gemini-3 name must send thinkingBudget", legacyThinking.has("thinkingBudget"));
         assertFalse("auto on a non-Gemini-3 name must NOT send thinkingLevel", legacyThinking.has("thinkingLevel"));
@@ -2530,7 +2530,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         // still route it through thinkingLevel.
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
         final JsonNode body =
-                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-4-flash"));
+                new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-4-flash"));
         final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
         assertTrue("forced true must send thinkingLevel even on a name the rule rejects", thinking.has("thinkingLevel"));
         assertFalse("forced true must NOT send thinkingBudget", thinking.has("thinkingBudget"));
@@ -2544,7 +2544,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         // route it through the legacy integer thinkingBudget field.
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(1234);
         final JsonNode body =
-                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-3-flash"));
+                new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-3-flash"));
         final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
         assertEquals(1234, thinking.path("thinkingBudget").asInt());
         assertFalse("forced false must NOT send thinkingLevel even on a Gemini 3 name", thinking.has("thinkingLevel"));
@@ -2592,13 +2592,13 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         client.setTestConfig("thinking.minimal.enabled", "auto");
 
         final LlmChatRequest flashRequest = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
-        final JsonNode flashBody = new com.fasterxml.jackson.databind.ObjectMapper()
-                .readTree(client.testBuildRequestBodyForModel(flashRequest, "gemini-3-flash"));
+        final JsonNode flashBody =
+                new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(flashRequest, "gemini-3-flash"));
         assertEquals("MINIMAL", flashBody.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
 
         final LlmChatRequest proRequest = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
         final JsonNode proBody =
-                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(proRequest, "gemini-3-pro"));
+                new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(proRequest, "gemini-3-pro"));
         assertEquals("LOW", proBody.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
     }
 
@@ -2610,7 +2610,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         // forced override must still choose MINIMAL at a non-positive budget.
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
         final JsonNode body =
-                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-3-pro"));
+                new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-3-pro"));
         assertEquals("MINIMAL", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
     }
 
@@ -2622,7 +2622,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         // forced override must still choose LOW at a non-positive budget.
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
         final JsonNode body =
-                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-3-flash"));
+                new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, "gemini-3-flash"));
         assertEquals("LOW", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
     }
 
@@ -2643,8 +2643,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         request.setModel(routeId);
         client.testApplyDefaultParams(request, "answer");
 
-        final JsonNode body =
-                new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, routeId));
+        final JsonNode body = new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, routeId));
         final JsonNode generationConfig = body.path("generationConfig");
         assertEquals("MINIMAL", generationConfig.path("thinkingConfig").path("thinkingLevel").asText());
         assertFalse("forced thinkingLevel must not be accompanied by thinkingBudget",
@@ -2679,7 +2678,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         // thinking.minimal.enabled needed, and none that could wrongly force MINIMAL onto Pro.
         client.setTestConfig("thinking.level.enabled", "true");
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
-        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper()
+        final JsonNode body = new tools.jackson.databind.ObjectMapper()
                 .readTree(client.testBuildRequestBodyForModel(request, "publishers/google/models/gemini-3-pro"));
         final JsonNode thinking = body.path("generationConfig").path("thinkingConfig");
         assertEquals("LOW", thinking.path("thinkingLevel").asText());
@@ -2691,7 +2690,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         // Same single key, Flash variant of the same gateway route: MINIMAL, not LOW.
         client.setTestConfig("thinking.level.enabled", "true");
         final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
-        final JsonNode body = new com.fasterxml.jackson.databind.ObjectMapper()
+        final JsonNode body = new tools.jackson.databind.ObjectMapper()
                 .readTree(client.testBuildRequestBodyForModel(request, "publishers/google/models/gemini-3-flash"));
         assertEquals("MINIMAL", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
     }
@@ -2705,8 +2704,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         for (final String model : new String[] { null, "", "   " }) {
             client.setTestModel(model);
             final LlmChatRequest request = new LlmChatRequest().addUserMessage("hi").setThinkingBudget(0);
-            final JsonNode body =
-                    new com.fasterxml.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, model));
+            final JsonNode body = new tools.jackson.databind.ObjectMapper().readTree(client.testBuildRequestBodyForModel(request, model));
             assertEquals("LOW", body.path("generationConfig").path("thinkingConfig").path("thinkingLevel").asText());
 
             // applyDefaultParams resolves the same chained capabilities on the same blank id.
