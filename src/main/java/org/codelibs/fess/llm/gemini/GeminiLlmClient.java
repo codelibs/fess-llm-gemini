@@ -51,8 +51,8 @@ import org.codelibs.fess.llm.LlmStreamCallback;
 import org.codelibs.fess.util.ComponentUtil;
 import org.codelibs.fess.util.CredentialUrlUtil;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
 
 /**
  * LLM client implementation for Google Gemini API.
@@ -573,7 +573,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                                                         streamDone = true;
                                                     }
                                                 }
-                                            } catch (final JsonProcessingException e) {
+                                            } catch (final JacksonException e) {
                                                 logger.warn("[LLM:GEMINI] Failed to parse streaming response. json={}", jsonStr, e);
                                             }
                                         }
