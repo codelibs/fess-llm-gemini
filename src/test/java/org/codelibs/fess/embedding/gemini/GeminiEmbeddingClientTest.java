@@ -996,11 +996,11 @@ public class GeminiEmbeddingClientTest extends UnitFessTestCase {
     }
 
     /**
-     * The availability probe runs on a timer, so a per-call ERROR would fill the log with the same
-     * line forever. It has to be reported once for as long as the configuration stays broken.
+     * No state may silence the report: every check that finds the URL broken logs it again, so a
+     * problem that persists - or comes back after the URL was fixed - is never hidden.
      */
     @Test
-    public void test_checkAvailabilityNow_userInfoApiUrl_errorLoggedOncePerConfiguration() {
+    public void test_checkAvailabilityNow_userInfoApiUrl_errorLoggedOnEveryCheck() {
         setupClient();
         client.setTestApiUrl(userInfoApiUrl());
 
@@ -1010,8 +1010,20 @@ public class GeminiEmbeddingClientTest extends UnitFessTestCase {
             assertFalse(client.isAvailable());
         });
 
-        assertEquals("the configuration error must be reported once, not once per call: " + logs, 1,
-                countLogs(logs, "http.proxy.username"));
+        assertEquals("the configuration error must be reported on every check: " + logs, 3, countLogs(logs, "http.proxy.username"));
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_userInfoApiUrl_reportedAgainWhenItRecurs() {
+        setupClient();
+
+        final List<String> logs = captureDebugLogs(() -> {
+            assertTrue(client.reportUserInfoApiUrl(userInfoApiUrl()));
+            assertFalse(client.reportUserInfoApiUrl("https://generativelanguage.googleapis.com/v1beta"));
+            assertTrue(client.reportUserInfoApiUrl(userInfoApiUrl()));
+        });
+
+        assertEquals("a recurrence after recovery must be reported again: " + logs, 2, countLogs(logs, "http.proxy.username"));
     }
 
     /**
