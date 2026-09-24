@@ -22,7 +22,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
@@ -167,13 +166,6 @@ public class GeminiEmbeddingClient extends AbstractEmbeddingClient {
 
     /** Collapses the gaps left where markup was removed. */
     private static final Pattern WHITESPACE_RUN = Pattern.compile("\\s+");
-
-    /**
-     * Whether the userinfo-bearing {@code api.url} has already been reported. The availability
-     * probe runs on a timer, so an unguarded ERROR would repeat the same line forever; this latches
-     * it to one report per broken configuration and re-arms once the URL is fixed.
-     */
-    private final AtomicBoolean userInfoApiUrlReported = new AtomicBoolean();
 
     /**
      * Default constructor.
@@ -614,21 +606,19 @@ public class GeminiEmbeddingClient extends AbstractEmbeddingClient {
      * URL can ever do anyway - HttpClient rejects such a request URI unconditionally, so the
      * endpoint was already unreachable; only the diagnosis changes.
      *
-     * <p>The ERROR is emitted once per broken configuration, because the availability check runs on
-     * a timer and would otherwise repeat it for the lifetime of the JVM. It names the setting and
-     * the supported alternative but never any part of the URL.
+     * <p>The ERROR is emitted on every check that finds the URL broken - once per availability
+     * check interval with the periodic probe - so the problem stays visible for as long as it
+     * lasts, including when it comes back after having been fixed. It names the setting and the
+     * supported alternative but never any part of the URL.
      *
      * @param apiUrl the configured API URL (may be {@code null} or blank)
      * @return {@code true} when the URL carries userinfo and no request may be issued
      */
     protected boolean reportUserInfoApiUrl(final String apiUrl) {
         if (!CredentialUrlUtil.hasUserInfo(apiUrl)) {
-            userInfoApiUrlReported.set(false);
             return false;
         }
-        if (userInfoApiUrlReported.compareAndSet(false, true)) {
-            logger.error("[Embedding:GEMINI] Gemini is not available. {}", GeminiApiUrl.userInfoRejectionMessage(apiUrlConfigKey()));
-        }
+        logger.error("[Embedding:GEMINI] Gemini is not available. {}", GeminiApiUrl.userInfoRejectionMessage(apiUrlConfigKey()));
         return true;
     }
 

@@ -2087,11 +2087,11 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
     }
 
     /**
-     * The availability probe runs on a timer, so a per-call ERROR would fill the log with the same
-     * line forever. It has to be reported once for as long as the configuration stays broken.
+     * No state may silence the report: every check that finds the URL broken logs it again, so a
+     * problem that persists - or comes back after the URL was fixed - is never hidden.
      */
     @Test
-    public void test_checkAvailabilityNow_userInfoApiUrl_errorLoggedOncePerConfiguration() {
+    public void test_checkAvailabilityNow_userInfoApiUrl_errorLoggedOnEveryCheck() {
         setupClientForMockServer();
         client.setTestApiUrl(userInfoApiUrl());
 
@@ -2101,8 +2101,20 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             assertFalse(client.isAvailable());
         });
 
-        assertEquals("the configuration error must be reported once, not once per call: " + logs, 1,
-                countLogs(logs, "http.proxy.username"));
+        assertEquals("the configuration error must be reported on every check: " + logs, 3, countLogs(logs, "http.proxy.username"));
+    }
+
+    @Test
+    public void test_checkAvailabilityNow_userInfoApiUrl_reportedAgainWhenItRecurs() {
+        setupClientForMockServer();
+
+        final List<String> logs = captureDebugLogs(() -> {
+            assertTrue(client.reportUserInfoApiUrl(userInfoApiUrl()));
+            assertFalse(client.reportUserInfoApiUrl("https://generativelanguage.googleapis.com/v1beta"));
+            assertTrue(client.reportUserInfoApiUrl(userInfoApiUrl()));
+        });
+
+        assertEquals("a recurrence after recovery must be reported again: " + logs, 2, countLogs(logs, "http.proxy.username"));
     }
 
     /**
@@ -2448,9 +2460,9 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
     }
 
     @Test
-    public void test_getCapabilityOverride_unrecognizedDegradesToAutoAndWarnsOnce() {
-        // Degrades to auto, not to false: a typo must not silently disable a capability. The
-        // predicates run on every request, so the WARN is deduplicated per key/value.
+    public void test_getCapabilityOverride_unrecognizedDegradesToAutoAndWarnsEveryTime() {
+        // Degrades to auto, not to false: a typo must not silently disable a capability. No state
+        // may silence the WARN, so it is repeated on every read for as long as the typo lasts.
         client.setTestConfig("thinking.level.enabled", "ture");
         final List<String> messages = new ArrayList<>();
         runStreamWithCapturedLogs(messages, () -> {
@@ -2460,27 +2472,26 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         });
         final List<String> warns =
                 messages.stream().filter(s -> s.contains("rag.llm.gemini.thinking.level.enabled") && s.contains("ture")).toList();
-        assertEquals("an unrecognized value must WARN exactly once", 1, warns.size());
+        assertEquals("an unrecognized value must WARN on every read, messages=" + messages, 3, warns.size());
     }
 
     @Test
-    public void test_getCapabilityOverride_warnsAgainForADifferentBadValue() {
+    public void test_getCapabilityOverride_warnsAgainWhenTheTypoRecursAfterAFix() {
         final List<String> messages = new ArrayList<>();
         runStreamWithCapturedLogs(messages, () -> {
             client.setTestConfig("thinking.level.enabled", "ture");
             client.getCapabilityOverride("thinking.level.enabled");
-            client.setTestConfig("thinking.level.enabled", "yes");
+            client.setTestConfig("thinking.level.enabled", "true");
+            client.getCapabilityOverride("thinking.level.enabled");
+            client.setTestConfig("thinking.level.enabled", "ture");
             client.getCapabilityOverride("thinking.level.enabled");
         });
         final List<String> warns = messages.stream().filter(s -> s.contains("rag.llm.gemini.thinking.level.enabled")).toList();
-        assertEquals("a second distinct bad value must be reported", 2, warns.size());
+        assertEquals("the same bad value must be reported again when it comes back, warns=" + warns, 2, warns.size());
     }
 
     @Test
-    public void test_getCapabilityOverride_dedupIsKeyedByKeyAndValueNotByValueAlone() {
-        // The dedup token is "<keySuffix>=<value>". Keyed by the value alone, the same typo under
-        // a second key would be swallowed and never reported, so this varies the key under one
-        // fixed bad value.
+    public void test_getCapabilityOverride_eachKeyNamedByItsOwnWarn() {
         final List<String> messages = new ArrayList<>();
         runStreamWithCapturedLogs(messages, () -> {
             client.setTestConfig("thinking.level.enabled", "ture");
@@ -2489,7 +2500,7 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
             client.getCapabilityOverride("thinking.headroom.enabled");
         });
         final List<String> warns = messages.stream().filter(s -> s.contains("value: ture")).toList();
-        assertEquals("the same bad value under two keys must be reported once per key, warns=" + warns, 2, warns.size());
+        assertEquals("the same bad value under two keys must be reported for each key, warns=" + warns, 2, warns.size());
         assertTrue("thinking.level.enabled must be named by its own WARN, warns=" + warns,
                 warns.stream().anyMatch(s -> s.contains("rag.llm.gemini.thinking.level.enabled")));
         assertTrue("thinking.headroom.enabled must be named by its own WARN, warns=" + warns,

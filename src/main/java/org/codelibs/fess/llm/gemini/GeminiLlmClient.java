@@ -24,10 +24,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
@@ -83,13 +80,6 @@ public class GeminiLlmClient extends AbstractLlmClient {
     private static final String CONFIG_THINKING_HEADROOM_ENABLED = "thinking.headroom.enabled";
 
     /**
-     * Capability keys already reported as carrying an unrecognized value, held as
-     * {@code <keySuffix>=<value>} tokens. The capability predicates run on every request, so a
-     * single misconfiguration would otherwise WARN on every call for as long as it lasts.
-     */
-    private final Set<String> warnedCapabilityValues = ConcurrentHashMap.newKeySet();
-
-    /**
      * Summary of a single streamChat invocation. Exposed for diagnostics, not part of the LLM SPI.
      */
     public static final class StreamSummary {
@@ -132,13 +122,6 @@ public class GeminiLlmClient extends AbstractLlmClient {
             this.elapsedMs = elapsedMs;
         }
     }
-
-    /**
-     * Whether the userinfo-bearing {@code api.url} has already been reported. The availability
-     * probe runs on a timer, so an unguarded ERROR would repeat the same line forever; this latches
-     * it to one report per broken configuration and re-arms once the URL is fixed.
-     */
-    private final AtomicBoolean userInfoApiUrlReported = new AtomicBoolean();
 
     /** Test hook; not thread-safe. Set once before invoking streamChat from a single thread. */
     private java.util.function.Consumer<StreamSummary> streamSummaryConsumer;
@@ -751,21 +734,19 @@ public class GeminiLlmClient extends AbstractLlmClient {
      * URL can ever do anyway - HttpClient rejects such a request URI unconditionally, so the
      * endpoint was already unreachable; only the diagnosis changes.
      *
-     * <p>The ERROR is emitted once per broken configuration, because the availability check runs on
-     * a timer and would otherwise repeat it for the lifetime of the JVM. It names the setting and
-     * the supported alternative but never any part of the URL.
+     * <p>The ERROR is emitted on every check that finds the URL broken - once per availability
+     * check interval with the periodic probe - so the problem stays visible for as long as it
+     * lasts, including when it comes back after having been fixed. It names the setting and the
+     * supported alternative but never any part of the URL.
      *
      * @param apiUrl the configured API URL (may be {@code null} or blank)
      * @return {@code true} when the URL carries userinfo and no request may be issued
      */
     protected boolean reportUserInfoApiUrl(final String apiUrl) {
         if (!CredentialUrlUtil.hasUserInfo(apiUrl)) {
-            userInfoApiUrlReported.set(false);
             return false;
         }
-        if (userInfoApiUrlReported.compareAndSet(false, true)) {
-            logger.error("[LLM:GEMINI] Gemini is not available. {}", GeminiApiUrl.userInfoRejectionMessage(API_URL_CONFIG_KEY));
-        }
+        logger.error("[LLM:GEMINI] Gemini is not available. {}", GeminiApiUrl.userInfoRejectionMessage(API_URL_CONFIG_KEY));
         return true;
     }
 
@@ -1293,9 +1274,9 @@ public class GeminiLlmClient extends AbstractLlmClient {
      * here means the parsing does not silently depend on that. A blank value is treated as
      * {@code auto} in silence - {@code key=} in a properties file reads as "left in place but
      * unset". Any other unrecognized value degrades to {@code auto} rather than to {@code false},
-     * so a typo cannot silently switch a capability off, and is reported once per distinct
-     * key/value pair - these predicates run on every request, so an undeduplicated WARN would
-     * flood the log for as long as the misconfiguration lasts.
+     * so a typo cannot silently switch a capability off, and is reported with a WARN each time it
+     * is read - these predicates run on every request, so the WARN recurs for as long as the
+     * misconfiguration lasts, alongside the per-request completion log.
      *
      * @param keySuffix the capability key suffix under {@link #getConfigPrefix()}.
      * @return {@link Boolean#TRUE} or {@link Boolean#FALSE} when the capability is forced,
@@ -1316,9 +1297,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
         if (StringUtil.isBlank(value) || Constants.AUTO.equalsIgnoreCase(value)) {
             return null;
         }
-        if (warnedCapabilityValues.add(keySuffix + "=" + value)) {
-            logger.warn("[LLM:GEMINI] Invalid {}.{} value: {}. Using {}.", getConfigPrefix(), keySuffix, value, Constants.AUTO);
-        }
+        logger.warn("[LLM:GEMINI] Invalid {}.{} value: {}. Using {}.", getConfigPrefix(), keySuffix, value, Constants.AUTO);
         return null;
     }
 
