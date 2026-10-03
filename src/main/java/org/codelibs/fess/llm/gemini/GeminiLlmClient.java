@@ -45,6 +45,7 @@ import org.codelibs.fess.llm.LlmChatResponse;
 import org.codelibs.fess.llm.LlmException;
 import org.codelibs.fess.llm.LlmMessage;
 import org.codelibs.fess.llm.LlmStreamCallback;
+import org.codelibs.fess.llm.LlmUsage;
 import org.codelibs.fess.util.ComponentUtil;
 import org.codelibs.fess.util.CredentialUrlUtil;
 
@@ -407,6 +408,7 @@ public class GeminiLlmClient extends AbstractLlmClient {
                     Integer candidatesTokenCount = null;
                     Integer thoughtsTokenCount = null;
                     Integer totalTokenCount = null;
+                    String lastModelVersion = null;
                     try (BufferedReader reader =
                             new BufferedReader(new InputStreamReader(response.getEntity().getContent(), StandardCharsets.UTF_8))) {
                         final StringBuilder jsonBuffer = new StringBuilder();
@@ -485,6 +487,9 @@ public class GeminiLlmClient extends AbstractLlmClient {
                                                 }
                                                 if (jsonNode.has("responseId") && !jsonNode.get("responseId").isNull()) {
                                                     lastResponseId = jsonNode.get("responseId").asText();
+                                                }
+                                                if (jsonNode.hasNonNull("modelVersion")) {
+                                                    lastModelVersion = jsonNode.get("modelVersion").asText();
                                                 }
                                                 if (jsonNode.has("promptFeedback")) {
                                                     final JsonNode pf = jsonNode.get("promptFeedback");
@@ -588,6 +593,10 @@ public class GeminiLlmClient extends AbstractLlmClient {
                                 promptTokenCount, cachedContentTokenCount, candidatesTokenCount, thoughtsTokenCount, totalTokenCount,
                                 firstChunkTime, elapsed));
                     }
+                    // usageMetadata carries the running totals of the whole call; without this the caller would
+                    // count the call but none of its tokens (the synchronous chat() reports them through its response).
+                    callback.onUsage(new LlmUsage(promptTokenCount, candidatesTokenCount, totalTokenCount,
+                            lastModelVersion != null ? lastModelVersion : model));
                     return null;
                 }
             }, callback);

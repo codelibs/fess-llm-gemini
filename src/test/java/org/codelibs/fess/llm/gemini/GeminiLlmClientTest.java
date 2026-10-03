@@ -38,6 +38,7 @@ import org.codelibs.fess.llm.LlmChatResponse;
 import org.codelibs.fess.llm.LlmException;
 import org.codelibs.fess.llm.LlmMessage;
 import org.codelibs.fess.llm.LlmStreamCallback;
+import org.codelibs.fess.llm.LlmUsage;
 import org.codelibs.fess.llm.gemini.GeminiLlmClient.StreamSummary;
 import org.codelibs.fess.unit.UnitFessTestCase;
 import org.junit.jupiter.api.Test;
@@ -1024,6 +1025,50 @@ public class GeminiLlmClientTest extends UnitFessTestCase {
         assertEquals(Integer.valueOf(2), s.candidatesTokenCount);
         assertEquals(Integer.valueOf(0), s.thoughtsTokenCount);
         assertEquals(Integer.valueOf(3), s.cachedContentTokenCount);
+    }
+
+    @Test
+    public void test_streamChat_reportsUsageOnceAfterTheLastChunk() throws IOException {
+        // usageMetadata grows with every chunk; only the totals of the last one are reported.
+        final String streamResponse = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hel\"}],\"role\":\"model\"}}],"
+                + "\"usageMetadata\":{\"promptTokenCount\":3,\"totalTokenCount\":3},\"modelVersion\":\"gemini-2.0-flash-001\"}\n\n"
+                + "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"lo\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],"
+                + "\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":2,\"totalTokenCount\":5},"
+                + "\"modelVersion\":\"gemini-2.0-flash-001\"}\n\n";
+        final List<String> events = new ArrayList<>();
+        final List<LlmUsage> usages = new ArrayList<>();
+        streamAndRecordUsage(streamResponse, events, usages);
+        assertEquals(List.of(new LlmUsage(3, 2, 5, "gemini-2.0-flash-001")), usages);
+        // The totals belong to the finished call: they arrive after the final chunk, not before.
+        assertEquals(List.of("chunk", "chunk", "usage"), events);
+    }
+
+    @Test
+    public void test_streamChat_reportsRequestedModelWithoutUsageMetadata() throws IOException {
+        // As chat() does, a response without modelVersion is attributed to the requested model; the
+        // counts Gemini left out stay unknown (null), not zero.
+        final String streamResponse =
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n";
+        final List<LlmUsage> usages = new ArrayList<>();
+        streamAndRecordUsage(streamResponse, new ArrayList<>(), usages);
+        assertEquals(List.of(new LlmUsage(null, null, null, "gemini-2.0-flash")), usages);
+    }
+
+    private void streamAndRecordUsage(final String body, final List<String> events, final List<LlmUsage> usages) {
+        mockServer.enqueue(new MockResponse().setBody(body).addHeader("Content-Type", "text/event-stream"));
+        setupClientForMockServer();
+        client.streamChat(new LlmChatRequest().addUserMessage("Hi"), new LlmStreamCallback() {
+            @Override
+            public void onChunk(final String content, final boolean done) {
+                events.add("chunk");
+            }
+
+            @Override
+            public void onUsage(final LlmUsage usage) {
+                events.add("usage");
+                usages.add(usage);
+            }
+        });
     }
 
     @Test
